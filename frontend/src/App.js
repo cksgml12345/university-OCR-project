@@ -22,6 +22,7 @@ function App() {
   const [processDone, setProcessDone] = useState(0);
   const [processPhase, setProcessPhase] = useState("idle");
   const directoryInputRef = useRef(null);
+  const processControlRef = useRef(null);
 
   useEffect(() => {
     fetchBooks();
@@ -171,6 +172,7 @@ function App() {
           settled = true;
           reject(error);
         };
+        processControlRef.current = { eventSource, reject: safeReject };
 
         eventSource.addEventListener("progress", (event) => {
           const payload = JSON.parse(event.data || "{}");
@@ -194,6 +196,7 @@ function App() {
           setProcessPhase("completed");
           setStatus(`OCR 공정 완료: ${resultPages.length}페이지 처리 완료`);
           eventSource.close();
+          processControlRef.current = null;
           safeResolve();
         });
 
@@ -205,20 +208,39 @@ function App() {
             safeReject(new Error("공정 실행 중 오류가 발생했습니다."));
           } finally {
             eventSource.close();
+            processControlRef.current = null;
           }
         });
 
         eventSource.onerror = () => {
           eventSource.close();
+          processControlRef.current = null;
           safeReject(new Error("공정 스트림 연결이 종료되었습니다."));
         };
       });
     } catch (err) {
-      setProcessPhase("idle");
-      setError(err.message || "공정 실행 중 오류가 발생했습니다.");
+      const message = err?.message || "공정 실행 중 오류가 발생했습니다.";
+      if (message === "공정이 취소되었습니다.") {
+        setProcessPhase("idle");
+        setStatus("공정이 취소되었습니다.");
+      } else {
+        setProcessPhase("idle");
+        setError(message);
+      }
     } finally {
       setIsBusy(false);
+      processControlRef.current = null;
     }
+  };
+
+  const cancelProcess = () => {
+    if (!processControlRef.current) {
+      return;
+    }
+    const { eventSource, reject } = processControlRef.current;
+    eventSource.close();
+    reject(new Error("공정이 취소되었습니다."));
+    processControlRef.current = null;
   };
 
   const deleteBook = async (bookName) => {
@@ -453,6 +475,14 @@ function App() {
                   </p>
                 </div>
                 <div className="process-actions">
+                  <button
+                    type="button"
+                    className="ghost-btn cancel-btn"
+                    onClick={cancelProcess}
+                    disabled={!isBusy || processPhase !== "running"}
+                  >
+                    공정 취소
+                  </button>
                   <button
                     type="button"
                     className="ghost-btn"

@@ -141,6 +141,16 @@ h1 {
   background: #f9fbfd;
 }
 
+.cancel-btn {
+  border-color: #e5c0c4;
+  color: #9f2b3a;
+}
+
+.cancel-btn:hover:not(:disabled) {
+  border-color: #d99ca4;
+  background: #fff5f6;
+}
+
 .upload-btn {
   display: inline-flex;
   width: 100%;
