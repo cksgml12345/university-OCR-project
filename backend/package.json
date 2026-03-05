@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "test": "echo \"No tests configured\"",
+    "test": "node --test",
     "build:frontend": "npm --prefix ../frontend run build",
     "start:single": "npm run build:frontend && node server.js"
   },
@@ -18,5 +18,8 @@
     "express": "^4.22.1",
     "multer": "^2.0.2",
     "tesseract.js": "^7.0.0"
+  },
+  "devDependencies": {
+    "supertest": "^7.1.4"
   }
 }

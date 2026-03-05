@@ -3,6 +3,10 @@ import axios from "axios";
 import "./App.css";
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || "";
+const THUMB_MIN_WIDTH = 130;
+const THUMB_GAP = 10;
+const THUMB_HEIGHT = 214;
+const THUMB_OVERSCAN_ROWS = 2;
 
 function App() {
   const [books, setBooks] = useState([]);
@@ -21,8 +25,29 @@ function App() {
   const [processTotal, setProcessTotal] = useState(0);
   const [processDone, setProcessDone] = useState(0);
   const [processPhase, setProcessPhase] = useState("idle");
+  const [skipProcessedPages, setSkipProcessedPages] = useState(true);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [ocrEditorText, setOcrEditorText] = useState("");
+  const [isLoadingOcrEditor, setIsLoadingOcrEditor] = useState(false);
+  const [isSavingOcrEditor, setIsSavingOcrEditor] = useState(false);
+  const [theme, setTheme] = useState(() => {
+    if (typeof window === "undefined") {
+      return "light";
+    }
+    const savedTheme = window.localStorage.getItem("book-ocr-theme");
+    if (savedTheme === "light" || savedTheme === "dark") {
+      return savedTheme;
+    }
+    return typeof window.matchMedia === "function" && window.matchMedia("(prefers-color-scheme: dark)").matches
+      ? "dark"
+      : "light";
+  });
+  const [thumbViewport, setThumbViewport] = useState({ width: 0, height: 0, scrollTop: 0 });
   const directoryInputRef = useRef(null);
   const processControlRef = useRef(null);
+  const thumbGridViewportRef = useRef(null);
 
   useEffect(() => {
     fetchBooks();
@@ -35,12 +60,78 @@ function App() {
     }
   }, []);
 
+  useEffect(() => {
+    if (typeof document === "undefined") {
+      return;
+    }
+    document.documentElement.setAttribute("data-theme", theme);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem("book-ocr-theme", theme);
+    }
+  }, [theme]);
+
+  useEffect(() => {
+    const viewport = thumbGridViewportRef.current;
+    if (!viewport) {
+      return undefined;
+    }
+
+    const updateViewport = () => {
+      setThumbViewport({
+        width: viewport.clientWidth,
+        height: viewport.clientHeight,
+        scrollTop: viewport.scrollTop,
+      });
+    };
+
+    updateViewport();
+    if (typeof ResizeObserver === "undefined") {
+      return undefined;
+    }
+    const resizeObserver = new ResizeObserver(updateViewport);
+    resizeObserver.observe(viewport);
+
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, [selectedBook]);
+
+  useEffect(() => {
+    if (!thumbGridViewportRef.current) {
+      return;
+    }
+    thumbGridViewportRef.current.scrollTop = 0;
+    setThumbViewport((prev) => ({ ...prev, scrollTop: 0 }));
+  }, [selectedBook, pages.length]);
+
+  useEffect(() => {
+    const loadSelectedPageOcr = async () => {
+      if (!selectedBook || !selectedPage || !ocrPages.includes(selectedPage)) {
+        setOcrEditorText("");
+        return;
+      }
+      try {
+        setIsLoadingOcrEditor(true);
+        const res = await axios.get(
+          `${API_BASE_URL}/books/${encodeURIComponent(selectedBook)}/ocr/${encodeURIComponent(selectedPage)}`
+        );
+        setOcrEditorText(typeof res.data?.text === "string" ? res.data.text : "");
+      } catch (_error) {
+        setOcrEditorText("");
+      } finally {
+        setIsLoadingOcrEditor(false);
+      }
+    };
+
+    loadSelectedPageOcr();
+  }, [selectedBook, selectedPage, ocrPages]);
+
   const fetchBooks = async () => {
     try {
       setError("");
       const res = await axios.get(`${API_BASE_URL}/books`);
       setBooks(Array.isArray(res.data) ? res.data : []);
-    } catch (err) {
+    } catch (_err) {
       setError("책 목록을 불러오지 못했습니다. 서버 상태를 확인해 주세요.");
     }
   };
@@ -49,13 +140,9 @@ function App() {
     try {
       setError("");
       setStatus(`"${book}" 페이지를 불러오는 중...`);
-      const res = await axios.get(
-        `${API_BASE_URL}/books/${encodeURIComponent(book)}`
-      );
+      const res = await axios.get(`${API_BASE_URL}/books/${encodeURIComponent(book)}`);
       const newPages = Array.isArray(res.data.pages) ? res.data.pages : [];
-      const newProcessedPages = Array.isArray(res.data.processedPages)
-        ? res.data.processedPages
-        : [];
+      const newProcessedPages = Array.isArray(res.data.processedPages) ? res.data.processedPages : [];
       const newOcrPages = Array.isArray(res.data.ocrPages) ? res.data.ocrPages : [];
       setSelectedBook(book);
       setPages(newPages);
@@ -63,14 +150,18 @@ function App() {
       setCheckedPages([]);
       setProcessedPages(newProcessedPages);
       setOcrPages(newOcrPages);
+      setSearchResults([]);
+      setSearchQuery("");
       setStatus(`"${book}" 로드 완료 (${newPages.length}페이지)`);
-    } catch (err) {
+    } catch (_err) {
       setError("페이지 목록을 불러오지 못했습니다.");
       setPages([]);
       setSelectedPage("");
       setCheckedPages([]);
       setProcessedPages([]);
       setOcrPages([]);
+      setSearchResults([]);
+      setSearchQuery("");
     }
   };
 
@@ -97,9 +188,7 @@ function App() {
           if (!progressEvent.total) {
             return;
           }
-          const percent = Math.round(
-            (progressEvent.loaded * 100) / progressEvent.total
-          );
+          const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total);
           setUploadProgress(percent);
         },
       });
@@ -110,11 +199,9 @@ function App() {
         await fetchPages(uploadedBooks[0]);
       }
       setStatus(
-        `업로드 완료 (${uploadedBooks.length || 0}권 / ${
-          res.data?.uploadedFiles || files.length
-        }개 파일)`
+        `업로드 완료 (${uploadedBooks.length || 0}권 / ${res.data?.uploadedFiles || files.length}개 파일)`
       );
-    } catch (err) {
+    } catch (_err) {
       setError("업로드에 실패했습니다. 폴더 선택과 서버 연결을 확인해 주세요.");
     } finally {
       setIsBusy(false);
@@ -138,24 +225,26 @@ function App() {
       setError("");
       setIsBusy(true);
 
-      const targetPages = mode === "selected" ? [...checkedPages] : [...pages];
-      const targetCount = targetPages.length;
-      setProcessTotal(targetCount);
+      const requestedPages = mode === "selected" ? [...checkedPages] : [...pages];
+      const requestedCount = requestedPages.length;
+      setProcessTotal(requestedCount);
       setProcessDone(0);
       setProcessProgress(0);
       setProcessPhase("running");
       setStatus(
-        `"${selectedBook}" ${mode === "selected" ? "선택 면" : "책 전체"} 공정 실행 중... (${targetCount}개)`
+        `"${selectedBook}" ${mode === "selected" ? "선택 면" : "책 전체"} 공정 실행 중... (${requestedCount}개)`
       );
 
       await new Promise((resolve, reject) => {
-        const query =
-          mode === "selected"
-            ? `?pages=${encodeURIComponent(targetPages.join(","))}`
-            : "";
-        const streamUrl = `${API_BASE_URL}/process-stream/${encodeURIComponent(
-          selectedBook
-        )}${query}`;
+        const params = new URLSearchParams();
+        if (mode === "selected") {
+          params.set("pages", requestedPages.join(","));
+        }
+        params.set("includeProcessed", String(!skipProcessedPages));
+
+        const streamUrl = `${API_BASE_URL}/process-stream/${encodeURIComponent(selectedBook)}?${
+          params.toString() || ""
+        }`;
         const eventSource = new EventSource(streamUrl);
         let settled = false;
         const safeResolve = () => {
@@ -165,19 +254,19 @@ function App() {
           settled = true;
           resolve();
         };
-        const safeReject = (error) => {
+        const safeReject = (processError) => {
           if (settled) {
             return;
           }
           settled = true;
-          reject(error);
+          reject(processError);
         };
         processControlRef.current = { eventSource, reject: safeReject };
 
         eventSource.addEventListener("progress", (event) => {
           const payload = JSON.parse(event.data || "{}");
           const done = Number(payload.done || 0);
-          const total = Number(payload.total || targetCount);
+          const total = Number(payload.total || requestedCount);
           const percent = Number(payload.percent || 0);
           setProcessDone(done);
           setProcessTotal(total);
@@ -187,14 +276,19 @@ function App() {
 
         eventSource.addEventListener("complete", (event) => {
           const payload = JSON.parse(event.data || "{}");
-          const resultPages = Array.isArray(payload.pages) ? payload.pages : targetPages;
+          const resultPages = Array.isArray(payload.pages) ? payload.pages : [];
+          const skippedPages = Array.isArray(payload.skippedPages) ? payload.skippedPages : [];
           setProcessedPages((prev) => [...new Set([...prev, ...resultPages])]);
           setOcrPages((prev) => [...new Set([...prev, ...resultPages])]);
           setProcessDone(resultPages.length);
-          setProcessTotal(resultPages.length || targetCount);
+          setProcessTotal(resultPages.length);
           setProcessProgress(100);
           setProcessPhase("completed");
-          setStatus(`OCR 공정 완료: ${resultPages.length}페이지 처리 완료`);
+          if (resultPages.length === 0 && skippedPages.length > 0) {
+            setStatus(`신규 처리 대상이 없어 완료됨 (기존 OCR ${skippedPages.length}개 스킵)`);
+          } else {
+            setStatus(`OCR 공정 완료: ${resultPages.length}페이지 처리 완료`);
+          }
           eventSource.close();
           processControlRef.current = null;
           safeResolve();
@@ -263,13 +357,64 @@ function App() {
         setCheckedPages([]);
         setProcessedPages([]);
         setOcrPages([]);
+        setSearchResults([]);
+        setSearchQuery("");
       }
 
       setStatus(`"${bookName}" 삭제 완료`);
-    } catch (err) {
+    } catch (_err) {
       setError("책 삭제에 실패했습니다.");
     } finally {
       setIsBusy(false);
+    }
+  };
+
+  const runOcrSearch = async () => {
+    if (!selectedBook) {
+      setError("검색할 책을 먼저 선택해 주세요.");
+      return;
+    }
+    const query = searchQuery.trim();
+    if (!query) {
+      setError("검색어를 입력해 주세요.");
+      return;
+    }
+
+    try {
+      setError("");
+      setIsSearching(true);
+      const res = await axios.get(
+        `${API_BASE_URL}/books/${encodeURIComponent(selectedBook)}/search?q=${encodeURIComponent(query)}`
+      );
+      setSearchResults(Array.isArray(res.data?.matches) ? res.data.matches : []);
+      setStatus(`"${query}" 검색 완료 (${res.data?.totalMatches || 0}개 페이지에서 발견)`);
+    } catch (_err) {
+      setSearchResults([]);
+      setError("OCR 검색에 실패했습니다.");
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  const saveSelectedPageOcr = async () => {
+    if (!selectedBook || !selectedPage) {
+      return;
+    }
+    try {
+      setError("");
+      setIsSavingOcrEditor(true);
+      const res = await axios.put(
+        `${API_BASE_URL}/books/${encodeURIComponent(selectedBook)}/ocr/${encodeURIComponent(selectedPage)}`,
+        { text: ocrEditorText }
+      );
+      const processed = Array.isArray(res.data?.processedPagesList) ? res.data.processedPagesList : [];
+      setProcessedPages(processed);
+      setOcrPages(processed);
+      setStatus(`"${selectedPage}" OCR 텍스트 저장 완료`);
+    } catch (_err) {
+      setError("OCR 텍스트 저장에 실패했습니다.");
+    } finally {
+      setIsSavingOcrEditor(false);
     }
   };
 
@@ -290,13 +435,49 @@ function App() {
   };
 
   const filteredBooks = useMemo(() => {
-    return books.filter((book) =>
-      book.name.toLowerCase().includes(searchTerm.toLowerCase())
-    );
+    return books.filter((book) => book.name.toLowerCase().includes(searchTerm.toLowerCase()));
   }, [books, searchTerm]);
 
   const selectedBookMeta = books.find((book) => book.name === selectedBook);
   const allOcrReady = pages.length > 0 && ocrPages.length === pages.length;
+  const totalPages = books.reduce((total, book) => total + (book.pageCount || 0), 0);
+  const processedCount = processedPages.length;
+  const ocrCompletionRate = pages.length > 0 ? Math.round((processedCount / pages.length) * 100) : 0;
+  const selectedPageIndex = selectedPage ? pages.indexOf(selectedPage) : -1;
+  const thumbColumns = Math.max(
+    1,
+    Math.floor((thumbViewport.width + THUMB_GAP) / (THUMB_MIN_WIDTH + THUMB_GAP)) || 1
+  );
+  const thumbCellWidth =
+    thumbViewport.width > 0
+      ? Math.max(THUMB_MIN_WIDTH, Math.floor((thumbViewport.width - THUMB_GAP * (thumbColumns - 1)) / thumbColumns))
+      : THUMB_MIN_WIDTH;
+  const thumbRowHeight = THUMB_HEIGHT + THUMB_GAP;
+  const thumbRowCount = Math.ceil(pages.length / thumbColumns);
+  const thumbTotalHeight = thumbRowCount > 0 ? thumbRowCount * thumbRowHeight - THUMB_GAP : 0;
+  const thumbStartRow = Math.max(0, Math.floor(thumbViewport.scrollTop / thumbRowHeight) - THUMB_OVERSCAN_ROWS);
+  const thumbEndRow = Math.min(
+    thumbRowCount - 1,
+    Math.floor((thumbViewport.scrollTop + thumbViewport.height) / thumbRowHeight) + THUMB_OVERSCAN_ROWS
+  );
+  const visibleThumbs = useMemo(() => {
+    if (pages.length === 0) {
+      return [];
+    }
+    const startIndex = thumbStartRow * thumbColumns;
+    const endIndex = Math.min(pages.length - 1, (thumbEndRow + 1) * thumbColumns - 1);
+    const items = [];
+    for (let index = startIndex; index <= endIndex; index += 1) {
+      const row = Math.floor(index / thumbColumns);
+      const col = index % thumbColumns;
+      items.push({
+        page: pages[index],
+        top: row * thumbRowHeight,
+        left: col * (thumbCellWidth + THUMB_GAP),
+      });
+    }
+    return items;
+  }, [pages, thumbColumns, thumbCellWidth, thumbStartRow, thumbEndRow, thumbRowHeight]);
 
   const extractFilename = (contentDisposition, fallbackName) => {
     if (!contentDisposition) {
@@ -333,9 +514,7 @@ function App() {
     if (!selectedBook) {
       return;
     }
-    const href = `${API_BASE_URL}/books/${encodeURIComponent(
-      selectedBook
-    )}/ocr/${encodeURIComponent(page)}/download`;
+    const href = `${API_BASE_URL}/books/${encodeURIComponent(selectedBook)}/ocr/${encodeURIComponent(page)}/download`;
     try {
       await triggerDownload(href, `${page.replace(/\.[^.]+$/, "")}.txt`);
     } catch (_error) {
@@ -347,9 +526,7 @@ function App() {
     if (!selectedBook) {
       return;
     }
-    const href = `${API_BASE_URL}/books/${encodeURIComponent(
-      selectedBook
-    )}/ocr/download-all`;
+    const href = `${API_BASE_URL}/books/${encodeURIComponent(selectedBook)}/ocr/download-all`;
     try {
       await triggerDownload(href, `${selectedBook}_ocr_all.txt`);
     } catch (_error) {
@@ -363,20 +540,29 @@ function App() {
         <div>
           <p className="eyebrow">Semester Project</p>
           <h1>Book Processing Console</h1>
-          <p className="subtitle">
-            업로드부터 페이지 검수, 공정 실행까지 한 번에 관리
-          </p>
+          <p className="subtitle">업로드부터 페이지 검수, 공정 실행까지 한 번에 관리</p>
         </div>
-        <div className="summary-cards">
-          <div className="summary-card">
-            <span>Books</span>
-            <strong>{books.length}</strong>
-          </div>
-          <div className="summary-card">
-            <span>Pages</span>
-            <strong>
-              {books.reduce((total, book) => total + (book.pageCount || 0), 0)}
-            </strong>
+        <div className="summary-area">
+          <button type="button" className="ghost-btn theme-btn" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
+            {theme === "dark" ? "라이트 모드" : "다크 모드"}
+          </button>
+          <div className="summary-cards">
+            <div className="summary-card">
+              <span>Books</span>
+              <strong>{books.length}</strong>
+            </div>
+            <div className="summary-card">
+              <span>Pages</span>
+              <strong>{totalPages}</strong>
+            </div>
+            <div className="summary-card">
+              <span>Current OCR</span>
+              <strong>{selectedBook ? `${ocrCompletionRate}%` : "-"}</strong>
+            </div>
+            <div className="summary-card">
+              <span>Selected</span>
+              <strong>{checkedPages.length}</strong>
+            </div>
           </div>
         </div>
       </header>
@@ -408,10 +594,7 @@ function App() {
 
           {uploadProgress > 0 && (
             <div className="progress-wrap">
-              <div
-                className="progress-bar"
-                style={{ width: `${uploadProgress}%` }}
-              />
+              <div className="progress-bar" style={{ width: `${uploadProgress}%` }} />
             </div>
           )}
 
@@ -423,14 +606,9 @@ function App() {
           />
 
           <div className="book-list">
-            {filteredBooks.length === 0 && (
-              <div className="empty">조건에 맞는 책이 없습니다.</div>
-            )}
+            {filteredBooks.length === 0 && <div className="empty">조건에 맞는 책이 없습니다.</div>}
             {filteredBooks.map((book) => (
-              <div
-                key={book.name}
-                className={`book-item-row ${selectedBook === book.name ? "active" : ""}`}
-              >
+              <div key={book.name} className={`book-item-row ${selectedBook === book.name ? "active" : ""}`}>
                 <button
                   type="button"
                   className="book-item"
@@ -459,20 +637,19 @@ function App() {
         </aside>
 
         <section className="panel viewer-panel">
-          {!selectedBook && (
-            <div className="empty viewer-empty">
-              책을 선택하면 페이지 미리보기가 표시됩니다.
-            </div>
-          )}
+          {!selectedBook && <div className="empty viewer-empty">책을 선택하면 페이지 미리보기가 표시됩니다.</div>}
 
           {selectedBook && (
             <>
               <div className="panel-head viewer-head">
                 <div>
                   <h2>{selectedBook}</h2>
-                  <p>
-                    {selectedBookMeta?.pageCount || pages.length}페이지 등록됨
-                  </p>
+                  <p>{selectedBookMeta?.pageCount || pages.length}페이지 등록됨</p>
+                  <div className="meta-badges">
+                    <span className="meta-badge">처리됨 {processedCount}</span>
+                    <span className="meta-badge">OCR 보유 {ocrPages.length}</span>
+                    <span className="meta-badge">전체 {pages.length}</span>
+                  </div>
                 </div>
                 <div className="process-actions">
                   <button
@@ -520,11 +697,48 @@ function App() {
                   />
                   전체 선택
                 </label>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={skipProcessedPages}
+                    onChange={(event) => setSkipProcessedPages(event.target.checked)}
+                    disabled={isBusy}
+                  />
+                  OCR 완료 페이지 건너뛰기
+                </label>
                 <span>{checkedPages.length}개 선택됨</span>
               </div>
 
-              {(processPhase === "running" || processPhase === "completed") &&
-                processTotal > 0 && (
+              <div className="search-row">
+                <input
+                  className="search-input"
+                  placeholder="OCR 텍스트 검색어"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  disabled={isBusy || isSearching}
+                />
+                <button type="button" className="ghost-btn" onClick={runOcrSearch} disabled={isBusy || isSearching}>
+                  검색
+                </button>
+              </div>
+
+              {searchResults.length > 0 && (
+                <div className="search-results">
+                  {searchResults.map((item) => (
+                    <button
+                      key={item.page}
+                      type="button"
+                      className="search-result-item"
+                      onClick={() => setSelectedPage(item.page)}
+                    >
+                      <strong>{item.page}</strong>
+                      <span>{item.excerpt || "미리보기 없음"}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {(processPhase === "running" || processPhase === "completed") && processTotal > 0 && (
                 <div className="process-progress-panel">
                   <div className="process-progress-head">
                     <span>공정 진행률</span>
@@ -533,10 +747,7 @@ function App() {
                     </strong>
                   </div>
                   <div className="progress-wrap process-progress-wrap">
-                    <div
-                      className="progress-bar process-progress-bar"
-                      style={{ width: `${processProgress}%` }}
-                    />
+                    <div className="progress-bar process-progress-bar" style={{ width: `${processProgress}%` }} />
                   </div>
                   {processPhase === "completed" && (
                     <button type="button" className="process-complete-btn">
@@ -548,54 +759,108 @@ function App() {
 
               {selectedPage ? (
                 <div className="preview-card">
+                  <div className="preview-top">
+                    <strong>{selectedPage}</strong>
+                    <div className="preview-nav">
+                      <button
+                        type="button"
+                        className="ghost-btn"
+                        onClick={() => setSelectedPage(pages[selectedPageIndex - 1])}
+                        disabled={selectedPageIndex <= 0}
+                      >
+                        이전
+                      </button>
+                      <button
+                        type="button"
+                        className="ghost-btn"
+                        onClick={() => setSelectedPage(pages[selectedPageIndex + 1])}
+                        disabled={selectedPageIndex < 0 || selectedPageIndex >= pages.length - 1}
+                      >
+                        다음
+                      </button>
+                    </div>
+                  </div>
                   <img
-                    src={`${API_BASE_URL}/uploads/${encodeURIComponent(
-                      selectedBook
-                    )}/${encodeURIComponent(selectedPage)}`}
+                    src={`${API_BASE_URL}/uploads/${encodeURIComponent(selectedBook)}/${encodeURIComponent(
+                      selectedPage
+                    )}`}
                     alt={selectedPage}
                   />
-                  <div className="preview-caption">{selectedPage}</div>
+                  <div className="preview-caption">
+                    {selectedPageIndex + 1} / {pages.length}
+                  </div>
                 </div>
               ) : (
                 <div className="empty">표시할 이미지 페이지가 없습니다.</div>
               )}
 
-              <div className="thumb-grid">
-                {pages.map((page) => (
+              <div className="ocr-editor">
+                <div className="ocr-editor-head">
+                  <strong>선택 페이지 OCR 편집</strong>
+                  <button
+                    type="button"
+                    className="ghost-btn"
+                    onClick={saveSelectedPageOcr}
+                    disabled={isBusy || isLoadingOcrEditor || isSavingOcrEditor || !selectedPage}
+                  >
+                    OCR 저장
+                  </button>
+                </div>
+                <textarea
+                  value={ocrEditorText}
+                  onChange={(event) => setOcrEditorText(event.target.value)}
+                  placeholder={
+                    selectedPage
+                      ? "OCR 결과가 없으면 공정을 먼저 실행하거나 직접 입력해 저장하세요."
+                      : "페이지를 선택하면 OCR 텍스트를 편집할 수 있습니다."
+                  }
+                  disabled={!selectedPage || isBusy || isLoadingOcrEditor || isSavingOcrEditor}
+                />
+              </div>
+
+              <div
+                className="thumb-grid-viewport"
+                ref={thumbGridViewportRef}
+                onScroll={(event) =>
+                  setThumbViewport((prev) => ({
+                    ...prev,
+                    scrollTop: event.currentTarget.scrollTop,
+                  }))
+                }
+              >
+                <div className="thumb-grid-spacer" style={{ height: `${thumbTotalHeight}px` }}>
+                  {visibleThumbs.map((item) => (
                   <div
-                    key={page}
-                    className={`thumb ${selectedPage === page ? "active" : ""}`}
-                    onClick={() => setSelectedPage(page)}
+                    key={item.page}
+                    className={`thumb virtual-thumb ${selectedPage === item.page ? "active" : ""}`}
+                    style={{
+                      width: `${thumbCellWidth}px`,
+                      height: `${THUMB_HEIGHT}px`,
+                      top: `${item.top}px`,
+                      left: `${item.left}px`,
+                    }}
+                    onClick={() => setSelectedPage(item.page)}
                     role="button"
                     tabIndex={0}
                     onKeyDown={(event) => {
                       if (event.key === "Enter" || event.key === " ") {
                         event.preventDefault();
-                        setSelectedPage(page);
+                        setSelectedPage(item.page);
                       }
                     }}
                   >
                     <img
-                      src={`${API_BASE_URL}/uploads/${encodeURIComponent(
-                        selectedBook
-                      )}/${encodeURIComponent(page)}`}
-                      alt={page}
+                      src={`${API_BASE_URL}/uploads/${encodeURIComponent(selectedBook)}/${encodeURIComponent(item.page)}`}
+                      alt={item.page}
                     />
-                    <span
-                      className={
-                        processedPages.includes(page) ? "thumb-name processed" : "thumb-name"
-                      }
-                    >
-                      {page}
+                    <span className={processedPages.includes(item.page) ? "thumb-name processed" : "thumb-name"}>
+                      {item.page}
                     </span>
-                    <label
-                      className="thumb-check"
-                      onClick={(event) => event.stopPropagation()}
-                    >
+                    <label className="thumb-check" onClick={(event) => event.stopPropagation()}>
                       <input
                         type="checkbox"
-                        checked={checkedPages.includes(page)}
-                        onChange={() => togglePageCheck(page)}
+                        checked={checkedPages.includes(item.page)}
+                        onChange={() => togglePageCheck(item.page)}
                         disabled={isBusy}
                       />
                       선택
@@ -605,14 +870,15 @@ function App() {
                       className="thumb-download-btn"
                       onClick={(event) => {
                         event.stopPropagation();
-                        downloadPageOcr(page);
+                        downloadPageOcr(item.page);
                       }}
-                      disabled={isBusy || !ocrPages.includes(page)}
+                      disabled={isBusy || !ocrPages.includes(item.page)}
                     >
                       txt 다운로드
                     </button>
                   </div>
-                ))}
+                  ))}
+                </div>
               </div>
             </>
           )}
