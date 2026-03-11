@@ -37,6 +37,7 @@ function App() {
   const [ocrMeta, setOcrMeta] = useState({});
   const [lowConfidencePages, setLowConfidencePages] = useState([]);
   const [confidenceThreshold, setConfidenceThreshold] = useState(80);
+  const [savedOcrSettings, setSavedOcrSettings] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -116,6 +117,18 @@ function App() {
   }, [selectedBook, pages.length]);
 
   useEffect(() => {
+    if (!ocrMeta || typeof ocrMeta !== "object") {
+      setLowConfidencePages([]);
+      return;
+    }
+    const recalculated = pages.filter((page) => {
+      const confidence = ocrMeta?.[page]?.confidence;
+      return typeof confidence === "number" && confidence < confidenceThreshold;
+    });
+    setLowConfidencePages(recalculated);
+  }, [ocrMeta, pages, confidenceThreshold]);
+
+  useEffect(() => {
     const loadSelectedPageOcr = async () => {
       if (!selectedBook || !selectedPage || !ocrPages.includes(selectedPage)) {
         setOcrEditorText("");
@@ -178,6 +191,15 @@ function App() {
         if (newSettings.postprocessRules && typeof newSettings.postprocessRules === "object") {
           setPostprocessRules((prev) => ({ ...prev, ...newSettings.postprocessRules }));
         }
+        if (typeof newSettings.confidenceThreshold === "number") {
+          setConfidenceThreshold(newSettings.confidenceThreshold);
+        }
+        setSavedOcrSettings({
+          confidenceThreshold: Number(newSettings.confidenceThreshold) || 80,
+          lang: newSettings.lang || "eng",
+          psm: String(newSettings.psm || "6"),
+          postprocessRules: { ...newSettings.postprocessRules },
+        });
       }
       setSearchResults([]);
       setSearchQuery("");
@@ -225,6 +247,15 @@ function App() {
         if (nextSettings.postprocessRules && typeof nextSettings.postprocessRules === "object") {
           setPostprocessRules((prev) => ({ ...prev, ...nextSettings.postprocessRules }));
         }
+        if (typeof nextSettings.confidenceThreshold === "number") {
+          setConfidenceThreshold(nextSettings.confidenceThreshold);
+        }
+        setSavedOcrSettings({
+          confidenceThreshold: Number(nextSettings.confidenceThreshold) || 80,
+          lang: nextSettings.lang || "eng",
+          psm: String(nextSettings.psm || "6"),
+          postprocessRules: { ...nextSettings.postprocessRules },
+        });
       }
       if (selectedPage && !nextPages.includes(selectedPage)) {
         setSelectedPage(nextPages[0] || "");
@@ -551,6 +582,12 @@ function App() {
         if (typeof settings.confidenceThreshold === "number") {
           setConfidenceThreshold(settings.confidenceThreshold);
         }
+        setSavedOcrSettings({
+          confidenceThreshold: Number(settings.confidenceThreshold) || 80,
+          lang: settings.lang || "eng",
+          psm: String(settings.psm || "6"),
+          postprocessRules: { ...settings.postprocessRules },
+        });
       }
       setStatus("OCR 설정 저장 완료");
       refreshBookMeta(selectedBook);
@@ -579,6 +616,14 @@ function App() {
   const ocrCompletionRate = pages.length > 0 ? Math.round((processedCount / pages.length) * 100) : 0;
   const selectedPageIndex = selectedPage ? pages.indexOf(selectedPage) : -1;
   const selectedPageMeta = selectedPage ? ocrMeta?.[selectedPage] : null;
+  const hasUnsavedSettings =
+    !savedOcrSettings ||
+    savedOcrSettings.confidenceThreshold !== confidenceThreshold ||
+    savedOcrSettings.lang !== ocrLang ||
+    String(savedOcrSettings.psm) !== String(ocrPsm) ||
+    Object.keys(postprocessRules).some(
+      (key) => postprocessRules[key] !== savedOcrSettings.postprocessRules?.[key]
+    );
   const thumbColumns = Math.max(
     1,
     Math.floor((thumbViewport.width + THUMB_GAP) / (THUMB_MIN_WIDTH + THUMB_GAP)) || 1
@@ -857,6 +902,7 @@ function App() {
                   <strong>OCR 옵션</strong>
                   <div className="ocr-options-actions">
                     <span>언어/PSM/후처리 설정</span>
+                    {hasUnsavedSettings && <span className="ocr-settings-dirty">변경됨</span>}
                     <button
                       type="button"
                       className="ghost-btn"
