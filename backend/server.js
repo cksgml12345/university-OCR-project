@@ -10,6 +10,12 @@ const DEFAULT_FRONTEND_BUILD_PATH = path.resolve(__dirname, "../frontend/build")
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".bmp"]);
 const OCR_LANG = process.env.OCR_LANG || "eng";
 const DEFAULT_CONFIDENCE_THRESHOLD = 80;
+const DEFAULT_POSTPROCESS_RULES = Object.freeze({
+  fixHyphenBreaks: true,
+  preserveParagraphs: true,
+  joinLines: true,
+  collapseWhitespace: true,
+});
 let tesseractModulePromise = null;
 
 const sortNaturally = (list) =>
@@ -79,6 +85,7 @@ const createApp = (options = {}) => {
 
   const getProcessStatePath = (bookPath) => path.join(bookPath, ".process-state.json");
   const getOcrMetaPath = (bookPath) => path.join(bookPath, ".ocr-meta.json");
+  const getOcrSettingsPath = (bookPath) => path.join(bookPath, ".ocr-settings.json");
 
   const readProcessedPages = (bookPath, allPages) => {
     const statePath = getProcessStatePath(bookPath);
@@ -127,6 +134,37 @@ const createApp = (options = {}) => {
     fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf8");
   };
 
+  const readOcrSettings = (bookPath) => {
+    const settingsPath = getOcrSettingsPath(bookPath);
+    if (!fs.existsSync(settingsPath)) {
+      return null;
+    }
+    try {
+      const raw = fs.readFileSync(settingsPath, "utf8");
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" ? parsed : null;
+    } catch (error) {
+      return null;
+    }
+  };
+
+  const writeOcrSettings = (bookPath, settings) => {
+    const settingsPath = getOcrSettingsPath(bookPath);
+    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), "utf8");
+  };
+
+  const normalizePostprocessRules = (rules) => {
+    if (!rules || typeof rules !== "object") {
+      return { ...DEFAULT_POSTPROCESS_RULES };
+    }
+    return {
+      fixHyphenBreaks: parseBoolean(rules.fixHyphenBreaks, DEFAULT_POSTPROCESS_RULES.fixHyphenBreaks),
+      preserveParagraphs: parseBoolean(rules.preserveParagraphs, DEFAULT_POSTPROCESS_RULES.preserveParagraphs),
+      joinLines: parseBoolean(rules.joinLines, DEFAULT_POSTPROCESS_RULES.joinLines),
+      collapseWhitespace: parseBoolean(rules.collapseWhitespace, DEFAULT_POSTPROCESS_RULES.collapseWhitespace),
+    };
+  };
+
   const getImagePages = (bookPath) => {
     const files = fs.readdirSync(bookPath);
     return sortNaturally(files.filter((file) => isImageFile(file)));
@@ -169,15 +207,30 @@ const createApp = (options = {}) => {
     return sortNaturally(ocrPages);
   };
 
-  const postprocessOcrText = (text) => {
+  const postprocessOcrText = (text, rules) => {
     if (!text) {
       return "";
     }
+    const normalizedRules = normalizePostprocessRules(rules);
     let normalized = String(text).replace(/\r\n/g, "\n");
-    normalized = normalized.replace(/(\w)-\n(\w)/g, "$1$2");
-    normalized = normalized.replace(/\n{2,}/g, "\n\n");
-    normalized = normalized.replace(/\n/g, " ");
-    normalized = normalized.replace(/\s{2,}/g, " ");
+
+    if (normalizedRules.fixHyphenBreaks) {
+      normalized = normalized.replace(/(\w)-\n(\w)/g, "$1$2");
+    }
+
+    if (normalizedRules.preserveParagraphs) {
+      const paragraphs = normalized
+        .split(/\n{2,}/)
+        .map((paragraph) => paragraph.replace(/\n+/g, " "));
+      normalized = paragraphs.join("\n\n");
+    } else if (normalizedRules.joinLines) {
+      normalized = normalized.replace(/\n+/g, " ");
+    }
+
+    if (normalizedRules.collapseWhitespace) {
+      normalized = normalized.replace(/[ \t]{2,}/g, " ");
+    }
+
     return normalized.trim();
   };
 
@@ -193,7 +246,9 @@ const createApp = (options = {}) => {
       const extracted = await extractTextFromImageLocal(imagePath, ocrOptions);
       const rawText = typeof extracted === "string" ? extracted : extracted?.text;
       const rawConfidence = typeof extracted === "string" ? null : extracted?.confidence;
-      const text = ocrOptions?.postprocess ? postprocessOcrText(rawText) : String(rawText || "").trim();
+      const text = ocrOptions?.postprocessRules
+        ? postprocessOcrText(rawText, ocrOptions.postprocessRules)
+        : String(rawText || "").trim();
       const txtPath = getOcrTextPath(bookPath, pageName);
       fs.writeFileSync(txtPath, text, "utf8");
       meta[pageName] = {
@@ -201,7 +256,7 @@ const createApp = (options = {}) => {
         confidence: typeof rawConfidence === "number" ? rawConfidence : null,
         lang: ocrOptions?.lang || OCR_LANG,
         psm: ocrOptions?.psm ? String(ocrOptions.psm) : null,
-        postprocess: Boolean(ocrOptions?.postprocess),
+        postprocessRules: normalizePostprocessRules(ocrOptions?.postprocessRules),
         charCount: text.length,
         processedAt: new Date().toISOString(),
       };
@@ -309,7 +364,9 @@ const createApp = (options = {}) => {
     const processedPages = readProcessedPages(bookPath, pages);
     const ocrPages = pages.filter((page) => fs.existsSync(getOcrTextPath(bookPath, page)));
     const ocrMeta = readOcrMeta(bookPath);
-    const confidenceThreshold = Number(req.query?.confidenceThreshold) || DEFAULT_CONFIDENCE_THRESHOLD;
+    const settings = readOcrSettings(bookPath);
+    const confidenceThreshold =
+      Number(req.query?.confidenceThreshold) || Number(settings?.confidenceThreshold) || DEFAULT_CONFIDENCE_THRESHOLD;
     const lowConfidencePages = pages.filter((page) => {
       const confidence = ocrMeta?.[page]?.confidence;
       return typeof confidence === "number" && confidence < confidenceThreshold;
@@ -325,6 +382,40 @@ const createApp = (options = {}) => {
       ocrMeta,
       lowConfidencePages,
       confidenceThreshold,
+      ocrSettings: settings,
+    });
+  });
+
+  app.put("/books/:bookName/settings", (req, res) => {
+    const resolved = resolveBookPath(req.params.bookName);
+    if (!resolved) {
+      return res.status(400).json({ message: "잘못된 책 이름입니다." });
+    }
+    if (!fs.existsSync(resolved.resolved)) {
+      return res.status(404).json({ message: "책 없음" });
+    }
+
+    const confidenceThreshold = Number(req.body?.confidenceThreshold);
+    const postprocessRules = normalizePostprocessRules(req.body?.postprocessRules);
+    const lang = req.body?.lang ? String(req.body.lang) : OCR_LANG;
+    const psm = req.body?.psm ? String(req.body.psm) : null;
+
+    const nextSettings = {
+      confidenceThreshold: Number.isFinite(confidenceThreshold)
+        ? Math.max(0, Math.min(100, confidenceThreshold))
+        : DEFAULT_CONFIDENCE_THRESHOLD,
+      postprocessRules,
+      lang,
+      psm,
+      updatedAt: new Date().toISOString(),
+    };
+
+    writeOcrSettings(resolved.resolved, nextSettings);
+
+    return res.json({
+      message: "OCR 설정 저장 완료",
+      bookName: resolved.normalizedName,
+      ocrSettings: nextSettings,
     });
   });
 
@@ -355,10 +446,15 @@ const createApp = (options = {}) => {
     }
 
     const allPages = getImagePages(resolved.resolved);
+    const settings = readOcrSettings(resolved.resolved);
+    const postprocessRules =
+      req.body?.postprocessRules && typeof req.body.postprocessRules === "object"
+        ? normalizePostprocessRules(req.body.postprocessRules)
+        : normalizePostprocessRules(settings?.postprocessRules);
     const ocrOptions = {
-      lang: String(req.body?.lang || OCR_LANG),
-      psm: req.body?.psm ? String(req.body.psm) : null,
-      postprocess: parseBoolean(req.body?.postprocess, true),
+      lang: String(req.body?.lang || settings?.lang || OCR_LANG),
+      psm: req.body?.psm ? String(req.body.psm) : settings?.psm || null,
+      postprocessRules,
     };
     const requestPages = Array.isArray(req.body?.pages) ? req.body.pages.map((page) => String(page)) : null;
     const includeProcessed = parseBoolean(req.body?.includeProcessed, false);
@@ -377,7 +473,10 @@ const createApp = (options = {}) => {
       const ocrResults = await runOcrForPages(resolved.resolved, targetPages, ocrOptions);
       const processedAfter = updateProcessedStateFromOcr(resolved.resolved, allPages);
       const ocrMeta = readOcrMeta(resolved.resolved);
-      const confidenceThreshold = Number(req.body?.confidenceThreshold) || DEFAULT_CONFIDENCE_THRESHOLD;
+      const confidenceThreshold =
+        Number(req.body?.confidenceThreshold) ||
+        Number(settings?.confidenceThreshold) ||
+        DEFAULT_CONFIDENCE_THRESHOLD;
       const lowConfidencePages = allPages.filter((page) => {
         const confidence = ocrMeta?.[page]?.confidence;
         return typeof confidence === "number" && confidence < confidenceThreshold;
@@ -399,6 +498,7 @@ const createApp = (options = {}) => {
         ocrMeta,
         lowConfidencePages,
         confidenceThreshold,
+        ocrSettings: settings,
         processedAt: new Date().toISOString(),
       });
     } catch (error) {
@@ -420,10 +520,22 @@ const createApp = (options = {}) => {
     }
 
     const allPages = getImagePages(resolved.resolved);
+    const settings = readOcrSettings(resolved.resolved);
+    let queryRules = null;
+    if (req.query?.postprocessRules) {
+      try {
+        queryRules = JSON.parse(String(req.query.postprocessRules));
+      } catch (_error) {
+        queryRules = null;
+      }
+    }
+    const postprocessRules = queryRules
+      ? normalizePostprocessRules(queryRules)
+      : normalizePostprocessRules(settings?.postprocessRules);
     const ocrOptions = {
-      lang: String(req.query?.lang || OCR_LANG),
-      psm: req.query?.psm ? String(req.query.psm) : null,
-      postprocess: parseBoolean(req.query?.postprocess, true),
+      lang: String(req.query?.lang || settings?.lang || OCR_LANG),
+      psm: req.query?.psm ? String(req.query.psm) : settings?.psm || null,
+      postprocessRules,
     };
     const rawPages = req.query?.pages;
     const includeProcessed = parseBoolean(req.query?.includeProcessed, false);
@@ -465,6 +577,7 @@ const createApp = (options = {}) => {
       mode: requestPages ? "selected-pages" : "whole-book",
       includeProcessed,
       ocrOptions,
+      ocrSettings: settings,
       skippedPages,
     });
 
@@ -480,7 +593,10 @@ const createApp = (options = {}) => {
 
       const processedAfter = updateProcessedStateFromOcr(resolved.resolved, allPages);
       const ocrMeta = readOcrMeta(resolved.resolved);
-      const confidenceThreshold = Number(req.query?.confidenceThreshold) || DEFAULT_CONFIDENCE_THRESHOLD;
+      const confidenceThreshold =
+        Number(req.query?.confidenceThreshold) ||
+        Number(settings?.confidenceThreshold) ||
+        DEFAULT_CONFIDENCE_THRESHOLD;
       const lowConfidencePages = allPages.filter((page) => {
         const confidence = ocrMeta?.[page]?.confidence;
         return typeof confidence === "number" && confidence < confidenceThreshold;
@@ -499,6 +615,7 @@ const createApp = (options = {}) => {
         ocrMeta,
         lowConfidencePages,
         confidenceThreshold,
+        ocrSettings: settings,
         processedAt: new Date().toISOString(),
       });
       return res.end();
@@ -533,7 +650,12 @@ const createApp = (options = {}) => {
 
     const text = fs.readFileSync(txtPath, "utf8");
     const ocrMeta = readOcrMeta(resolved.resolved);
-    return res.json({ bookName: resolved.normalizedName, pageName, text, meta: ocrMeta?.[pageName] || null });
+    return res.json({
+      bookName: resolved.normalizedName,
+      pageName,
+      text,
+      meta: ocrMeta?.[pageName] || null,
+    });
   });
 
   app.put("/books/:bookName/ocr/:pageName", (req, res) => {

@@ -28,7 +28,12 @@ function App() {
   const [skipProcessedPages, setSkipProcessedPages] = useState(true);
   const [ocrLang, setOcrLang] = useState("eng");
   const [ocrPsm, setOcrPsm] = useState("6");
-  const [enablePostprocess, setEnablePostprocess] = useState(true);
+  const [postprocessRules, setPostprocessRules] = useState({
+    fixHyphenBreaks: true,
+    preserveParagraphs: true,
+    joinLines: true,
+    collapseWhitespace: true,
+  });
   const [ocrMeta, setOcrMeta] = useState({});
   const [lowConfidencePages, setLowConfidencePages] = useState([]);
   const [confidenceThreshold, setConfidenceThreshold] = useState(80);
@@ -153,6 +158,7 @@ function App() {
       const newOcrMeta = res.data?.ocrMeta && typeof res.data.ocrMeta === "object" ? res.data.ocrMeta : {};
       const newLowConfidence = Array.isArray(res.data?.lowConfidencePages) ? res.data.lowConfidencePages : [];
       const newConfidenceThreshold = Number(res.data?.confidenceThreshold) || 80;
+      const newSettings = res.data?.ocrSettings && typeof res.data.ocrSettings === "object" ? res.data.ocrSettings : null;
       setSelectedBook(book);
       setPages(newPages);
       setSelectedPage(newPages[0] || "");
@@ -162,6 +168,17 @@ function App() {
       setOcrMeta(newOcrMeta);
       setLowConfidencePages(newLowConfidence);
       setConfidenceThreshold(newConfidenceThreshold);
+      if (newSettings) {
+        if (newSettings.lang) {
+          setOcrLang(newSettings.lang);
+        }
+        if (newSettings.psm) {
+          setOcrPsm(String(newSettings.psm));
+        }
+        if (newSettings.postprocessRules && typeof newSettings.postprocessRules === "object") {
+          setPostprocessRules((prev) => ({ ...prev, ...newSettings.postprocessRules }));
+        }
+      }
       setSearchResults([]);
       setSearchQuery("");
       setStatus(`"${book}" 로드 완료 (${newPages.length}페이지)`);
@@ -191,12 +208,24 @@ function App() {
       const nextOcrMeta = res.data?.ocrMeta && typeof res.data.ocrMeta === "object" ? res.data.ocrMeta : {};
       const nextLowConfidence = Array.isArray(res.data?.lowConfidencePages) ? res.data.lowConfidencePages : [];
       const nextConfidenceThreshold = Number(res.data?.confidenceThreshold) || 80;
+      const nextSettings = res.data?.ocrSettings && typeof res.data.ocrSettings === "object" ? res.data.ocrSettings : null;
       setPages(nextPages);
       setProcessedPages(nextProcessedPages);
       setOcrPages(nextOcrPages);
       setOcrMeta(nextOcrMeta);
       setLowConfidencePages(nextLowConfidence);
       setConfidenceThreshold(nextConfidenceThreshold);
+      if (nextSettings) {
+        if (nextSettings.lang) {
+          setOcrLang(nextSettings.lang);
+        }
+        if (nextSettings.psm) {
+          setOcrPsm(String(nextSettings.psm));
+        }
+        if (nextSettings.postprocessRules && typeof nextSettings.postprocessRules === "object") {
+          setPostprocessRules((prev) => ({ ...prev, ...nextSettings.postprocessRules }));
+        }
+      }
       if (selectedPage && !nextPages.includes(selectedPage)) {
         setSelectedPage(nextPages[0] || "");
       }
@@ -287,7 +316,7 @@ function App() {
         if (ocrPsm) {
           params.set("psm", String(ocrPsm));
         }
-        params.set("postprocess", String(enablePostprocess));
+        params.set("postprocessRules", JSON.stringify(postprocessRules));
         params.set("confidenceThreshold", String(confidenceThreshold));
 
         const streamUrl = `${API_BASE_URL}/process-stream/${encodeURIComponent(selectedBook)}?${
@@ -488,6 +517,48 @@ function App() {
       return;
     }
     setCheckedPages([...pages]);
+  };
+
+  const saveOcrSettings = async () => {
+    if (!selectedBook) {
+      setError("먼저 책을 선택해 주세요.");
+      return;
+    }
+    try {
+      setError("");
+      setIsBusy(true);
+      const payload = {
+        confidenceThreshold,
+        lang: ocrLang,
+        psm: ocrPsm,
+        postprocessRules,
+      };
+      const res = await axios.put(
+        `${API_BASE_URL}/books/${encodeURIComponent(selectedBook)}/settings`,
+        payload
+      );
+      if (res.data?.ocrSettings && typeof res.data.ocrSettings === "object") {
+        const settings = res.data.ocrSettings;
+        if (settings.lang) {
+          setOcrLang(settings.lang);
+        }
+        if (settings.psm) {
+          setOcrPsm(String(settings.psm));
+        }
+        if (settings.postprocessRules && typeof settings.postprocessRules === "object") {
+          setPostprocessRules((prev) => ({ ...prev, ...settings.postprocessRules }));
+        }
+        if (typeof settings.confidenceThreshold === "number") {
+          setConfidenceThreshold(settings.confidenceThreshold);
+        }
+      }
+      setStatus("OCR 설정 저장 완료");
+      refreshBookMeta(selectedBook);
+    } catch (_err) {
+      setError("OCR 설정 저장에 실패했습니다.");
+    } finally {
+      setIsBusy(false);
+    }
   };
 
   const selectLowConfidence = () => {
@@ -784,7 +855,17 @@ function App() {
               <div className="ocr-options">
                 <div className="ocr-options-head">
                   <strong>OCR 옵션</strong>
-                  <span>언어/PSM/후처리 설정</span>
+                  <div className="ocr-options-actions">
+                    <span>언어/PSM/후처리 설정</span>
+                    <button
+                      type="button"
+                      className="ghost-btn"
+                      onClick={saveOcrSettings}
+                      disabled={isBusy || !selectedBook}
+                    >
+                      설정 저장
+                    </button>
+                  </div>
                 </div>
                 <div className="ocr-options-grid">
                   <label>
@@ -807,15 +888,6 @@ function App() {
                       <option value="12">12 (스파스+OSD)</option>
                     </select>
                   </label>
-                  <label className="inline-toggle">
-                    <input
-                      type="checkbox"
-                      checked={enablePostprocess}
-                      onChange={(event) => setEnablePostprocess(event.target.checked)}
-                      disabled={isBusy}
-                    />
-                    후처리(줄바꿈/하이픈 정리)
-                  </label>
                   <label>
                     저신뢰 기준
                     <input
@@ -826,6 +898,50 @@ function App() {
                       onChange={(event) => setConfidenceThreshold(Number(event.target.value))}
                       disabled={isBusy}
                     />
+                  </label>
+                  <label className="inline-toggle">
+                    <input
+                      type="checkbox"
+                      checked={postprocessRules.fixHyphenBreaks}
+                      onChange={(event) =>
+                        setPostprocessRules((prev) => ({ ...prev, fixHyphenBreaks: event.target.checked }))
+                      }
+                      disabled={isBusy}
+                    />
+                    하이픈 줄바꿈 정리
+                  </label>
+                  <label className="inline-toggle">
+                    <input
+                      type="checkbox"
+                      checked={postprocessRules.preserveParagraphs}
+                      onChange={(event) =>
+                        setPostprocessRules((prev) => ({ ...prev, preserveParagraphs: event.target.checked }))
+                      }
+                      disabled={isBusy}
+                    />
+                    문단 유지
+                  </label>
+                  <label className="inline-toggle">
+                    <input
+                      type="checkbox"
+                      checked={postprocessRules.joinLines}
+                      onChange={(event) =>
+                        setPostprocessRules((prev) => ({ ...prev, joinLines: event.target.checked }))
+                      }
+                      disabled={isBusy}
+                    />
+                    줄 합치기
+                  </label>
+                  <label className="inline-toggle">
+                    <input
+                      type="checkbox"
+                      checked={postprocessRules.collapseWhitespace}
+                      onChange={(event) =>
+                        setPostprocessRules((prev) => ({ ...prev, collapseWhitespace: event.target.checked }))
+                      }
+                      disabled={isBusy}
+                    />
+                    공백 정리
                   </label>
                 </div>
               </div>
