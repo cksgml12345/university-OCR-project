@@ -38,6 +38,8 @@ function App() {
   const [lowConfidencePages, setLowConfidencePages] = useState([]);
   const [confidenceThreshold, setConfidenceThreshold] = useState(80);
   const [savedOcrSettings, setSavedOcrSettings] = useState(null);
+  const [installPrompt, setInstallPrompt] = useState(null);
+  const [isInstalled, setIsInstalled] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -63,6 +65,23 @@ function App() {
 
   useEffect(() => {
     fetchBooks();
+  }, []);
+
+  useEffect(() => {
+    const onBeforeInstallPrompt = (event) => {
+      event.preventDefault();
+      setInstallPrompt(event);
+    };
+    const onAppInstalled = () => {
+      setIsInstalled(true);
+      setInstallPrompt(null);
+    };
+    window.addEventListener("beforeinstallprompt", onBeforeInstallPrompt);
+    window.addEventListener("appinstalled", onAppInstalled);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", onBeforeInstallPrompt);
+      window.removeEventListener("appinstalled", onAppInstalled);
+    };
   }, []);
 
   useEffect(() => {
@@ -550,6 +569,20 @@ function App() {
     setCheckedPages([...pages]);
   };
 
+  const handleInstall = async () => {
+    if (!installPrompt) {
+      return;
+    }
+    installPrompt.prompt();
+    try {
+      await installPrompt.userChoice;
+    } catch (_error) {
+      // Ignore install errors.
+    } finally {
+      setInstallPrompt(null);
+    }
+  };
+
   const saveOcrSettings = async () => {
     if (!selectedBook) {
       setError("먼저 책을 선택해 주세요.");
@@ -723,6 +756,11 @@ function App() {
           <p className="subtitle">업로드부터 페이지 검수, 공정 실행까지 한 번에 관리</p>
         </div>
         <div className="summary-area">
+          {installPrompt && !isInstalled && (
+            <button type="button" className="ghost-btn install-btn" onClick={handleInstall}>
+              앱 설치
+            </button>
+          )}
           <button type="button" className="ghost-btn theme-btn" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
             {theme === "dark" ? "라이트 모드" : "다크 모드"}
           </button>

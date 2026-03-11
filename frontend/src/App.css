@@ -99,6 +99,14 @@ h1 {
   justify-self: end;
 }
 
+.install-btn {
+  justify-self: end;
+  border-color: #b8d5ef;
+  background: #e7f1fa;
+  color: var(--accent-dark);
+  font-weight: 700;
+}
+
 .summary-card {
   min-width: 120px;
   border: 1px solid var(--line);
