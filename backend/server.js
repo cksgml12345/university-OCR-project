@@ -9,6 +9,7 @@ const DEFAULT_UPLOAD_ROOT = path.join(__dirname, "uploads");
 const DEFAULT_FRONTEND_BUILD_PATH = path.resolve(__dirname, "../frontend/build");
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".bmp"]);
 const OCR_LANG = process.env.OCR_LANG || "eng";
+const DEFAULT_CONFIDENCE_THRESHOLD = 80;
 let tesseractModulePromise = null;
 
 const sortNaturally = (list) =>
@@ -29,10 +30,18 @@ const getTesseract = async () => {
   return tesseractModulePromise;
 };
 
-const defaultOcrExtractor = async (imagePath) => {
+const defaultOcrExtractor = async (imagePath, options = {}) => {
   const Tesseract = await getTesseract();
-  const result = await Tesseract.recognize(imagePath, OCR_LANG);
-  return String(result?.data?.text || "").trim();
+  const lang = options.lang || OCR_LANG;
+  const config = {};
+  if (options.psm) {
+    config.tessedit_pageseg_mode = String(options.psm);
+  }
+  const result = await Tesseract.recognize(imagePath, lang, config);
+  return {
+    text: String(result?.data?.text || "").trim(),
+    confidence: typeof result?.data?.confidence === "number" ? result.data.confidence : null,
+  };
 };
 
 const createApp = (options = {}) => {
@@ -69,6 +78,7 @@ const createApp = (options = {}) => {
   const isImageFile = (fileName) => IMAGE_EXTENSIONS.has(path.extname(fileName).toLowerCase());
 
   const getProcessStatePath = (bookPath) => path.join(bookPath, ".process-state.json");
+  const getOcrMetaPath = (bookPath) => path.join(bookPath, ".ocr-meta.json");
 
   const readProcessedPages = (bookPath, allPages) => {
     const statePath = getProcessStatePath(bookPath);
@@ -96,6 +106,25 @@ const createApp = (options = {}) => {
       updatedAt: new Date().toISOString(),
     };
     fs.writeFileSync(statePath, JSON.stringify(payload, null, 2), "utf8");
+  };
+
+  const readOcrMeta = (bookPath) => {
+    const metaPath = getOcrMetaPath(bookPath);
+    if (!fs.existsSync(metaPath)) {
+      return {};
+    }
+    try {
+      const raw = fs.readFileSync(metaPath, "utf8");
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch (error) {
+      return {};
+    }
+  };
+
+  const writeOcrMeta = (bookPath, meta) => {
+    const metaPath = getOcrMetaPath(bookPath);
+    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf8");
   };
 
   const getImagePages = (bookPath) => {
@@ -140,21 +169,47 @@ const createApp = (options = {}) => {
     return sortNaturally(ocrPages);
   };
 
-  const runOcrForPages = async (bookPath, pages, onProgress) => {
+  const postprocessOcrText = (text) => {
+    if (!text) {
+      return "";
+    }
+    let normalized = String(text).replace(/\r\n/g, "\n");
+    normalized = normalized.replace(/(\w)-\n(\w)/g, "$1$2");
+    normalized = normalized.replace(/\n{2,}/g, "\n\n");
+    normalized = normalized.replace(/\n/g, " ");
+    normalized = normalized.replace(/\s{2,}/g, " ");
+    return normalized.trim();
+  };
+
+  const runOcrForPages = async (bookPath, pages, ocrOptions, onProgress) => {
     const ocrRoot = path.join(bookPath, "ocr");
     fs.mkdirSync(ocrRoot, { recursive: true });
     const ocrResults = [];
+    const meta = readOcrMeta(bookPath);
 
     for (let index = 0; index < pages.length; index += 1) {
       const pageName = pages[index];
       const imagePath = path.join(bookPath, pageName);
-      const text = await extractTextFromImageLocal(imagePath);
+      const extracted = await extractTextFromImageLocal(imagePath, ocrOptions);
+      const rawText = typeof extracted === "string" ? extracted : extracted?.text;
+      const rawConfidence = typeof extracted === "string" ? null : extracted?.confidence;
+      const text = ocrOptions?.postprocess ? postprocessOcrText(rawText) : String(rawText || "").trim();
       const txtPath = getOcrTextPath(bookPath, pageName);
       fs.writeFileSync(txtPath, text, "utf8");
+      meta[pageName] = {
+        ...(meta[pageName] || {}),
+        confidence: typeof rawConfidence === "number" ? rawConfidence : null,
+        lang: ocrOptions?.lang || OCR_LANG,
+        psm: ocrOptions?.psm ? String(ocrOptions.psm) : null,
+        postprocess: Boolean(ocrOptions?.postprocess),
+        charCount: text.length,
+        processedAt: new Date().toISOString(),
+      };
       ocrResults.push({
         page: pageName,
         textFile: path.basename(txtPath),
         charCount: text.length,
+        confidence: typeof rawConfidence === "number" ? rawConfidence : null,
       });
       if (onProgress) {
         onProgress({
@@ -166,6 +221,7 @@ const createApp = (options = {}) => {
       }
     }
 
+    writeOcrMeta(bookPath, meta);
     return ocrResults;
   };
 
@@ -252,6 +308,12 @@ const createApp = (options = {}) => {
     const pages = getImagePages(bookPath);
     const processedPages = readProcessedPages(bookPath, pages);
     const ocrPages = pages.filter((page) => fs.existsSync(getOcrTextPath(bookPath, page)));
+    const ocrMeta = readOcrMeta(bookPath);
+    const confidenceThreshold = Number(req.query?.confidenceThreshold) || DEFAULT_CONFIDENCE_THRESHOLD;
+    const lowConfidencePages = pages.filter((page) => {
+      const confidence = ocrMeta?.[page]?.confidence;
+      return typeof confidence === "number" && confidence < confidenceThreshold;
+    });
 
     return res.json({
       bookName: normalizedName,
@@ -260,6 +322,9 @@ const createApp = (options = {}) => {
       processedPages,
       ocrPages,
       allOcrReady: pages.length > 0 && ocrPages.length === pages.length,
+      ocrMeta,
+      lowConfidencePages,
+      confidenceThreshold,
     });
   });
 
@@ -290,6 +355,11 @@ const createApp = (options = {}) => {
     }
 
     const allPages = getImagePages(resolved.resolved);
+    const ocrOptions = {
+      lang: String(req.body?.lang || OCR_LANG),
+      psm: req.body?.psm ? String(req.body.psm) : null,
+      postprocess: parseBoolean(req.body?.postprocess, true),
+    };
     const requestPages = Array.isArray(req.body?.pages) ? req.body.pages.map((page) => String(page)) : null;
     const includeProcessed = parseBoolean(req.body?.includeProcessed, false);
     const requestedPages = resolveTargetPages(allPages, requestPages);
@@ -304,14 +374,21 @@ const createApp = (options = {}) => {
     }
 
     try {
-      const ocrResults = await runOcrForPages(resolved.resolved, targetPages);
+      const ocrResults = await runOcrForPages(resolved.resolved, targetPages, ocrOptions);
       const processedAfter = updateProcessedStateFromOcr(resolved.resolved, allPages);
+      const ocrMeta = readOcrMeta(resolved.resolved);
+      const confidenceThreshold = Number(req.body?.confidenceThreshold) || DEFAULT_CONFIDENCE_THRESHOLD;
+      const lowConfidencePages = allPages.filter((page) => {
+        const confidence = ocrMeta?.[page]?.confidence;
+        return typeof confidence === "number" && confidence < confidenceThreshold;
+      });
 
       return res.json({
         message: targetPages.length ? "OCR 공정 완료" : "처리할 신규 페이지가 없습니다.",
         mode: requestPages ? "selected-pages" : "whole-book",
         bookName: resolved.normalizedName,
         includeProcessed,
+        ocrOptions,
         processedPages: targetPages.length,
         skippedPages,
         pages: targetPages,
@@ -319,6 +396,9 @@ const createApp = (options = {}) => {
         processedPagesList: processedAfter,
         ocrOutputDir: "ocr",
         ocrResults,
+        ocrMeta,
+        lowConfidencePages,
+        confidenceThreshold,
         processedAt: new Date().toISOString(),
       });
     } catch (error) {
@@ -340,6 +420,11 @@ const createApp = (options = {}) => {
     }
 
     const allPages = getImagePages(resolved.resolved);
+    const ocrOptions = {
+      lang: String(req.query?.lang || OCR_LANG),
+      psm: req.query?.psm ? String(req.query.psm) : null,
+      postprocess: parseBoolean(req.query?.postprocess, true),
+    };
     const rawPages = req.query?.pages;
     const includeProcessed = parseBoolean(req.query?.includeProcessed, false);
     const requestPages = rawPages
@@ -379,11 +464,12 @@ const createApp = (options = {}) => {
       total: targetPages.length,
       mode: requestPages ? "selected-pages" : "whole-book",
       includeProcessed,
+      ocrOptions,
       skippedPages,
     });
 
     try {
-      await runOcrForPages(resolved.resolved, targetPages, (progress) => {
+      await runOcrForPages(resolved.resolved, targetPages, ocrOptions, (progress) => {
         if (!closed) {
           sendEvent("progress", progress);
         }
@@ -393,16 +479,26 @@ const createApp = (options = {}) => {
       }
 
       const processedAfter = updateProcessedStateFromOcr(resolved.resolved, allPages);
+      const ocrMeta = readOcrMeta(resolved.resolved);
+      const confidenceThreshold = Number(req.query?.confidenceThreshold) || DEFAULT_CONFIDENCE_THRESHOLD;
+      const lowConfidencePages = allPages.filter((page) => {
+        const confidence = ocrMeta?.[page]?.confidence;
+        return typeof confidence === "number" && confidence < confidenceThreshold;
+      });
       sendEvent("complete", {
         message: targetPages.length ? "OCR 공정 완료" : "처리할 신규 페이지가 없습니다.",
         mode: requestPages ? "selected-pages" : "whole-book",
         bookName: resolved.normalizedName,
         includeProcessed,
+        ocrOptions,
         processedPages: targetPages.length,
         skippedPages,
         pages: targetPages,
         totalProcessedPages: processedAfter.length,
         processedPagesList: processedAfter,
+        ocrMeta,
+        lowConfidencePages,
+        confidenceThreshold,
         processedAt: new Date().toISOString(),
       });
       return res.end();
@@ -436,7 +532,8 @@ const createApp = (options = {}) => {
     }
 
     const text = fs.readFileSync(txtPath, "utf8");
-    return res.json({ bookName: resolved.normalizedName, pageName, text });
+    const ocrMeta = readOcrMeta(resolved.resolved);
+    return res.json({ bookName: resolved.normalizedName, pageName, text, meta: ocrMeta?.[pageName] || null });
   });
 
   app.put("/books/:bookName/ocr/:pageName", (req, res) => {
@@ -462,6 +559,14 @@ const createApp = (options = {}) => {
     fs.mkdirSync(ocrRoot, { recursive: true });
     const txtPath = getOcrTextPath(resolved.resolved, pageName);
     fs.writeFileSync(txtPath, req.body.text, "utf8");
+    const ocrMeta = readOcrMeta(resolved.resolved);
+    ocrMeta[pageName] = {
+      ...(ocrMeta[pageName] || {}),
+      edited: true,
+      charCount: req.body.text.length,
+      updatedAt: new Date().toISOString(),
+    };
+    writeOcrMeta(resolved.resolved, ocrMeta);
     const processedAfter = updateProcessedStateFromOcr(resolved.resolved, allPages);
 
     return res.json({

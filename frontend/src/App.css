@@ -425,6 +425,58 @@ textarea:focus-visible {
   font-weight: 600;
 }
 
+.ocr-options {
+  margin-bottom: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel) 95%, var(--bg-soft));
+  padding: 10px 12px;
+}
+
+.ocr-options-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.ocr-options-head span {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.ocr-options-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px 12px;
+  align-items: center;
+}
+
+.ocr-options-grid label {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.ocr-options-grid select,
+.ocr-options-grid input[type="number"] {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 8px;
+  background: var(--panel);
+  color: var(--ink);
+}
+
+.inline-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink);
+}
+
 .preview-card {
   border: 1px solid var(--line);
   border-radius: 14px;
@@ -442,6 +494,27 @@ textarea:focus-visible {
 
 .preview-top strong {
   font-size: 14px;
+}
+
+.preview-meta {
+  margin-top: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.preview-meta span {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: color-mix(in srgb, var(--panel) 95%, var(--bg-soft));
+}
+
+.preview-meta-edited {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
 }
 
 .preview-nav {
@@ -561,6 +634,7 @@ textarea:focus-visible {
   transition: transform 0.16s ease, box-shadow 0.16s ease;
   display: flex;
   flex-direction: column;
+  position: relative;
 }
 
 .virtual-thumb {
@@ -590,6 +664,29 @@ textarea:focus-visible {
 .thumb-name.processed {
   color: var(--success);
   font-weight: 700;
+}
+
+.thumb-meta {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 0 7px 6px;
+}
+
+.thumb-badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: #ffdbde;
+  color: #9d2f3c;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 999px;
+}
+
+.thumb.low-confidence {
+  border-color: #e3a3ad;
+  box-shadow: 0 0 0 2px rgba(201, 88, 102, 0.2) inset;
 }
 
 .thumb-check {

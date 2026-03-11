@@ -26,6 +26,12 @@ function App() {
   const [processDone, setProcessDone] = useState(0);
   const [processPhase, setProcessPhase] = useState("idle");
   const [skipProcessedPages, setSkipProcessedPages] = useState(true);
+  const [ocrLang, setOcrLang] = useState("eng");
+  const [ocrPsm, setOcrPsm] = useState("6");
+  const [enablePostprocess, setEnablePostprocess] = useState(true);
+  const [ocrMeta, setOcrMeta] = useState({});
+  const [lowConfidencePages, setLowConfidencePages] = useState([]);
+  const [confidenceThreshold, setConfidenceThreshold] = useState(80);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -144,12 +150,18 @@ function App() {
       const newPages = Array.isArray(res.data.pages) ? res.data.pages : [];
       const newProcessedPages = Array.isArray(res.data.processedPages) ? res.data.processedPages : [];
       const newOcrPages = Array.isArray(res.data.ocrPages) ? res.data.ocrPages : [];
+      const newOcrMeta = res.data?.ocrMeta && typeof res.data.ocrMeta === "object" ? res.data.ocrMeta : {};
+      const newLowConfidence = Array.isArray(res.data?.lowConfidencePages) ? res.data.lowConfidencePages : [];
+      const newConfidenceThreshold = Number(res.data?.confidenceThreshold) || 80;
       setSelectedBook(book);
       setPages(newPages);
       setSelectedPage(newPages[0] || "");
       setCheckedPages([]);
       setProcessedPages(newProcessedPages);
       setOcrPages(newOcrPages);
+      setOcrMeta(newOcrMeta);
+      setLowConfidencePages(newLowConfidence);
+      setConfidenceThreshold(newConfidenceThreshold);
       setSearchResults([]);
       setSearchQuery("");
       setStatus(`"${book}" 로드 완료 (${newPages.length}페이지)`);
@@ -160,8 +172,36 @@ function App() {
       setCheckedPages([]);
       setProcessedPages([]);
       setOcrPages([]);
+      setOcrMeta({});
+      setLowConfidencePages([]);
       setSearchResults([]);
       setSearchQuery("");
+    }
+  };
+
+  const refreshBookMeta = async (book) => {
+    if (!book) {
+      return;
+    }
+    try {
+      const res = await axios.get(`${API_BASE_URL}/books/${encodeURIComponent(book)}`);
+      const nextPages = Array.isArray(res.data.pages) ? res.data.pages : [];
+      const nextProcessedPages = Array.isArray(res.data.processedPages) ? res.data.processedPages : [];
+      const nextOcrPages = Array.isArray(res.data.ocrPages) ? res.data.ocrPages : [];
+      const nextOcrMeta = res.data?.ocrMeta && typeof res.data.ocrMeta === "object" ? res.data.ocrMeta : {};
+      const nextLowConfidence = Array.isArray(res.data?.lowConfidencePages) ? res.data.lowConfidencePages : [];
+      const nextConfidenceThreshold = Number(res.data?.confidenceThreshold) || 80;
+      setPages(nextPages);
+      setProcessedPages(nextProcessedPages);
+      setOcrPages(nextOcrPages);
+      setOcrMeta(nextOcrMeta);
+      setLowConfidencePages(nextLowConfidence);
+      setConfidenceThreshold(nextConfidenceThreshold);
+      if (selectedPage && !nextPages.includes(selectedPage)) {
+        setSelectedPage(nextPages[0] || "");
+      }
+    } catch (_err) {
+      setError("책 메타 정보를 갱신하지 못했습니다.");
     }
   };
 
@@ -241,6 +281,14 @@ function App() {
           params.set("pages", requestedPages.join(","));
         }
         params.set("includeProcessed", String(!skipProcessedPages));
+        if (ocrLang) {
+          params.set("lang", ocrLang);
+        }
+        if (ocrPsm) {
+          params.set("psm", String(ocrPsm));
+        }
+        params.set("postprocess", String(enablePostprocess));
+        params.set("confidenceThreshold", String(confidenceThreshold));
 
         const streamUrl = `${API_BASE_URL}/process-stream/${encodeURIComponent(selectedBook)}?${
           params.toString() || ""
@@ -280,6 +328,12 @@ function App() {
           const skippedPages = Array.isArray(payload.skippedPages) ? payload.skippedPages : [];
           setProcessedPages((prev) => [...new Set([...prev, ...resultPages])]);
           setOcrPages((prev) => [...new Set([...prev, ...resultPages])]);
+          if (payload?.ocrMeta && typeof payload.ocrMeta === "object") {
+            setOcrMeta(payload.ocrMeta);
+          }
+          if (Array.isArray(payload?.lowConfidencePages)) {
+            setLowConfidencePages(payload.lowConfidencePages);
+          }
           setProcessDone(resultPages.length);
           setProcessTotal(resultPages.length);
           setProcessProgress(100);
@@ -291,6 +345,7 @@ function App() {
           }
           eventSource.close();
           processControlRef.current = null;
+          refreshBookMeta(selectedBook);
           safeResolve();
         });
 
@@ -410,6 +465,7 @@ function App() {
       const processed = Array.isArray(res.data?.processedPagesList) ? res.data.processedPagesList : [];
       setProcessedPages(processed);
       setOcrPages(processed);
+      refreshBookMeta(selectedBook);
       setStatus(`"${selectedPage}" OCR 텍스트 저장 완료`);
     } catch (_err) {
       setError("OCR 텍스트 저장에 실패했습니다.");
@@ -434,6 +490,13 @@ function App() {
     setCheckedPages([...pages]);
   };
 
+  const selectLowConfidence = () => {
+    if (lowConfidencePages.length === 0) {
+      return;
+    }
+    setCheckedPages(lowConfidencePages);
+  };
+
   const filteredBooks = useMemo(() => {
     return books.filter((book) => book.name.toLowerCase().includes(searchTerm.toLowerCase()));
   }, [books, searchTerm]);
@@ -444,6 +507,7 @@ function App() {
   const processedCount = processedPages.length;
   const ocrCompletionRate = pages.length > 0 ? Math.round((processedCount / pages.length) * 100) : 0;
   const selectedPageIndex = selectedPage ? pages.indexOf(selectedPage) : -1;
+  const selectedPageMeta = selectedPage ? ocrMeta?.[selectedPage] : null;
   const thumbColumns = Math.max(
     1,
     Math.floor((thumbViewport.width + THUMB_GAP) / (THUMB_MIN_WIDTH + THUMB_GAP)) || 1
@@ -706,7 +770,64 @@ function App() {
                   />
                   OCR 완료 페이지 건너뛰기
                 </label>
+                <button
+                  type="button"
+                  className="ghost-btn"
+                  onClick={selectLowConfidence}
+                  disabled={isBusy || lowConfidencePages.length === 0}
+                >
+                  저신뢰 페이지 선택 ({lowConfidencePages.length})
+                </button>
                 <span>{checkedPages.length}개 선택됨</span>
+              </div>
+
+              <div className="ocr-options">
+                <div className="ocr-options-head">
+                  <strong>OCR 옵션</strong>
+                  <span>언어/PSM/후처리 설정</span>
+                </div>
+                <div className="ocr-options-grid">
+                  <label>
+                    언어
+                    <select value={ocrLang} onChange={(e) => setOcrLang(e.target.value)} disabled={isBusy}>
+                      <option value="eng">eng</option>
+                      <option value="kor">kor</option>
+                      <option value="eng+kor">eng+kor</option>
+                      <option value="jpn">jpn</option>
+                      <option value="chi_sim">chi_sim</option>
+                    </select>
+                  </label>
+                  <label>
+                    PSM
+                    <select value={ocrPsm} onChange={(e) => setOcrPsm(e.target.value)} disabled={isBusy}>
+                      <option value="3">3 (자동)</option>
+                      <option value="4">4 (단일 컬럼)</option>
+                      <option value="6">6 (텍스트 블록)</option>
+                      <option value="11">11 (스파스)</option>
+                      <option value="12">12 (스파스+OSD)</option>
+                    </select>
+                  </label>
+                  <label className="inline-toggle">
+                    <input
+                      type="checkbox"
+                      checked={enablePostprocess}
+                      onChange={(event) => setEnablePostprocess(event.target.checked)}
+                      disabled={isBusy}
+                    />
+                    후처리(줄바꿈/하이픈 정리)
+                  </label>
+                  <label>
+                    저신뢰 기준
+                    <input
+                      type="number"
+                      min="0"
+                      max="100"
+                      value={confidenceThreshold}
+                      onChange={(event) => setConfidenceThreshold(Number(event.target.value))}
+                      disabled={isBusy}
+                    />
+                  </label>
+                </div>
               </div>
 
               <div className="search-row">
@@ -760,7 +881,17 @@ function App() {
               {selectedPage ? (
                 <div className="preview-card">
                   <div className="preview-top">
-                    <strong>{selectedPage}</strong>
+                    <div>
+                      <strong>{selectedPage}</strong>
+                      {selectedPageMeta && (
+                        <div className="preview-meta">
+                          <span>Conf {typeof selectedPageMeta.confidence === "number" ? `${Math.round(selectedPageMeta.confidence)}%` : "-"}</span>
+                          <span>Lang {selectedPageMeta.lang || "-"}</span>
+                          <span>PSM {selectedPageMeta.psm || "-"}</span>
+                          {selectedPageMeta.edited && <span className="preview-meta-edited">수정됨</span>}
+                        </div>
+                      )}
+                    </div>
                     <div className="preview-nav">
                       <button
                         type="button"
@@ -829,55 +960,67 @@ function App() {
                 }
               >
                 <div className="thumb-grid-spacer" style={{ height: `${thumbTotalHeight}px` }}>
-                  {visibleThumbs.map((item) => (
-                  <div
-                    key={item.page}
-                    className={`thumb virtual-thumb ${selectedPage === item.page ? "active" : ""}`}
-                    style={{
-                      width: `${thumbCellWidth}px`,
-                      height: `${THUMB_HEIGHT}px`,
-                      top: `${item.top}px`,
-                      left: `${item.left}px`,
-                    }}
-                    onClick={() => setSelectedPage(item.page)}
-                    role="button"
-                    tabIndex={0}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
-                        setSelectedPage(item.page);
-                      }
-                    }}
-                  >
-                    <img
-                      src={`${API_BASE_URL}/uploads/${encodeURIComponent(selectedBook)}/${encodeURIComponent(item.page)}`}
-                      alt={item.page}
-                    />
-                    <span className={processedPages.includes(item.page) ? "thumb-name processed" : "thumb-name"}>
-                      {item.page}
-                    </span>
-                    <label className="thumb-check" onClick={(event) => event.stopPropagation()}>
-                      <input
-                        type="checkbox"
-                        checked={checkedPages.includes(item.page)}
-                        onChange={() => togglePageCheck(item.page)}
-                        disabled={isBusy}
-                      />
-                      선택
-                    </label>
-                    <button
-                      type="button"
-                      className="thumb-download-btn"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        downloadPageOcr(item.page);
-                      }}
-                      disabled={isBusy || !ocrPages.includes(item.page)}
-                    >
-                      txt 다운로드
-                    </button>
-                  </div>
-                  ))}
+                  {visibleThumbs.map((item) => {
+                    const meta = ocrMeta?.[item.page];
+                    const isLowConfidence = lowConfidencePages.includes(item.page);
+                    return (
+                      <div
+                        key={item.page}
+                        className={`thumb virtual-thumb ${selectedPage === item.page ? "active" : ""} ${
+                          isLowConfidence ? "low-confidence" : ""
+                        }`}
+                        style={{
+                          width: `${thumbCellWidth}px`,
+                          height: `${THUMB_HEIGHT}px`,
+                          top: `${item.top}px`,
+                          left: `${item.left}px`,
+                        }}
+                        onClick={() => setSelectedPage(item.page)}
+                        role="button"
+                        tabIndex={0}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            setSelectedPage(item.page);
+                          }
+                        }}
+                      >
+                        {isLowConfidence && <span className="thumb-badge">Low</span>}
+                        <img
+                          src={`${API_BASE_URL}/uploads/${encodeURIComponent(selectedBook)}/${encodeURIComponent(
+                            item.page
+                          )}`}
+                          alt={item.page}
+                        />
+                        <span className={processedPages.includes(item.page) ? "thumb-name processed" : "thumb-name"}>
+                          {item.page}
+                        </span>
+                        <span className="thumb-meta">
+                          {typeof meta?.confidence === "number" ? `Conf ${Math.round(meta.confidence)}%` : "Conf -"}
+                        </span>
+                        <label className="thumb-check" onClick={(event) => event.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            checked={checkedPages.includes(item.page)}
+                            onChange={() => togglePageCheck(item.page)}
+                            disabled={isBusy}
+                          />
+                          선택
+                        </label>
+                        <button
+                          type="button"
+                          className="thumb-download-btn"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            downloadPageOcr(item.page);
+                          }}
+                          disabled={isBusy || !ocrPages.includes(item.page)}
+                        >
+                          txt 다운로드
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             </>
