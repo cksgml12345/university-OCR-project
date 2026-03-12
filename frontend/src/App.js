@@ -1641,12 +1641,13 @@ function App() {
               <div
                 className="thumb-grid-viewport"
                 ref={thumbGridViewportRef}
-                onScroll={(event) =>
+                onScroll={(event) => {
+                  const nextScrollTop = event.currentTarget ? event.currentTarget.scrollTop : 0;
                   setThumbViewport((prev) => ({
                     ...prev,
-                    scrollTop: event.currentTarget.scrollTop,
-                  }))
-                }
+                    scrollTop: nextScrollTop,
+                  }));
+                }}
               >
                 <div className="thumb-grid-spacer" style={{ height: `${thumbTotalHeight}px` }}>
                   {visibleThumbs.map((item) => {
