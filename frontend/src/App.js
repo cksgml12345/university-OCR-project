@@ -7,6 +7,68 @@ const THUMB_MIN_WIDTH = 130;
 const THUMB_GAP = 10;
 const THUMB_HEIGHT = 214;
 const THUMB_OVERSCAN_ROWS = 2;
+const QUEUE_STORAGE_KEY = "book-ocr-upload-queue";
+const QUEUE_DB_NAME = "book-ocr-upload-queue";
+const QUEUE_DB_VERSION = 1;
+const QUEUE_DB_STORE = "queue-files";
+const QUEUE_LIMIT_MB = Number(process.env.REACT_APP_UPLOAD_QUEUE_LIMIT_MB) || 400;
+const QUEUE_LIMIT_BYTES = QUEUE_LIMIT_MB * 1024 * 1024;
+
+const openQueueDb = () =>
+  new Promise((resolve) => {
+    if (typeof indexedDB === "undefined") {
+      resolve(null);
+      return;
+    }
+    const request = indexedDB.open(QUEUE_DB_NAME, QUEUE_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(QUEUE_DB_STORE)) {
+        db.createObjectStore(QUEUE_DB_STORE, { keyPath: "id" });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => resolve(null);
+  });
+
+const putQueueFiles = async (id, files) => {
+  const db = await openQueueDb();
+  if (!db) {
+    return false;
+  }
+  return new Promise((resolve) => {
+    const tx = db.transaction(QUEUE_DB_STORE, "readwrite");
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => resolve(false);
+    tx.objectStore(QUEUE_DB_STORE).put({ id, files });
+  });
+};
+
+const getQueueFiles = async (id) => {
+  const db = await openQueueDb();
+  if (!db) {
+    return null;
+  }
+  return new Promise((resolve) => {
+    const tx = db.transaction(QUEUE_DB_STORE, "readonly");
+    const req = tx.objectStore(QUEUE_DB_STORE).get(id);
+    req.onsuccess = () => resolve(req.result?.files || null);
+    req.onerror = () => resolve(null);
+  });
+};
+
+const deleteQueueFiles = async (id) => {
+  const db = await openQueueDb();
+  if (!db) {
+    return false;
+  }
+  return new Promise((resolve) => {
+    const tx = db.transaction(QUEUE_DB_STORE, "readwrite");
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => resolve(false);
+    tx.objectStore(QUEUE_DB_STORE).delete(id);
+  });
+};
 
 function App() {
   const [books, setBooks] = useState([]);
@@ -21,6 +83,18 @@ function App() {
   const [error, setError] = useState("");
   const [isBusy, setIsBusy] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [isOffline, setIsOffline] = useState(() => {
+    if (typeof navigator === "undefined") {
+      return false;
+    }
+    return !navigator.onLine;
+  });
+  const [uploadQueue, setUploadQueue] = useState([]);
+  const [toast, setToast] = useState({ message: "", type: "info", visible: false });
+  const [expandedQueueIds, setExpandedQueueIds] = useState(new Set());
+  const [queueSearch, setQueueSearch] = useState("");
+  const [queueSort, setQueueSort] = useState("name-asc");
+  const [pendingCleanup, setPendingCleanup] = useState(false);
   const [processProgress, setProcessProgress] = useState(0);
   const [processTotal, setProcessTotal] = useState(0);
   const [processDone, setProcessDone] = useState(0);
@@ -62,9 +136,84 @@ function App() {
   const directoryInputRef = useRef(null);
   const processControlRef = useRef(null);
   const thumbGridViewportRef = useRef(null);
+  const toastTimerRef = useRef(null);
+  const uploadQueueRef = useRef([]);
+  const isProcessingQueueRef = useRef(false);
 
   useEffect(() => {
     fetchBooks();
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const saved = window.localStorage.getItem(QUEUE_STORAGE_KEY);
+    if (!saved) {
+      return;
+    }
+    try {
+      const parsed = JSON.parse(saved);
+      if (Array.isArray(parsed)) {
+        const hydrated = parsed.map((item) => ({
+          ...item,
+          files: null,
+        }));
+        setUploadQueue(hydrated);
+      }
+    } catch (_err) {
+      // Ignore corrupted storage
+    }
+  }, []);
+
+  useEffect(() => {
+    uploadQueueRef.current = uploadQueue;
+  }, [uploadQueue]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const serializable = uploadQueue.map(({ files, ...rest }) => rest);
+    window.localStorage.setItem(QUEUE_STORAGE_KEY, JSON.stringify(serializable));
+  }, [uploadQueue]);
+
+  useEffect(() => {
+    const idSet = new Set(uploadQueue.map((item) => item.id));
+    setExpandedQueueIds((prev) => {
+      const next = new Set();
+      prev.forEach((id) => {
+        if (idSet.has(id)) {
+          next.add(id);
+        }
+      });
+      return next;
+    });
+  }, [uploadQueue.length]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return undefined;
+    }
+
+    const handleOnline = () => {
+      setIsOffline(false);
+      setStatus("네트워크 복구됨. 대기열을 처리합니다.");
+      showToast("네트워크 복구됨. 업로드를 재시도합니다.", "success");
+    };
+
+    const handleOffline = () => {
+      setIsOffline(true);
+      setStatus("오프라인 상태입니다. 업로드는 대기열에 저장됩니다.");
+      showToast("오프라인 상태입니다. 업로드가 대기열에 저장됩니다.", "warn");
+    };
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
   }, []);
 
   useEffect(() => {
@@ -146,6 +295,268 @@ function App() {
     });
     setLowConfidencePages(recalculated);
   }, [ocrMeta, pages, confidenceThreshold]);
+
+  useEffect(() => {
+    if (toastTimerRef.current) {
+      return () => clearTimeout(toastTimerRef.current);
+    }
+    return undefined;
+  }, [toast.visible]);
+
+  useEffect(() => {
+    if (isOffline || isBusy || uploadQueue.length === 0) {
+      return;
+    }
+    processUploadQueue();
+  }, [isOffline, isBusy, uploadQueue.length]);
+
+  const showToast = (message, type = "info", duration = 3500) => {
+    if (toastTimerRef.current) {
+      clearTimeout(toastTimerRef.current);
+    }
+    setToast({ message, type, visible: true });
+    toastTimerRef.current = setTimeout(() => {
+      setToast((prev) => ({ ...prev, visible: false }));
+    }, duration);
+  };
+
+  const enqueueUpload = async (files, reason = "offline") => {
+    const safeFiles = Array.isArray(files) ? files : [];
+    if (safeFiles.length === 0) {
+      return;
+    }
+    const filesMeta = safeFiles.map((file) => ({
+      name: file.name,
+      size: file.size,
+      path: file.webkitRelativePath || file.name,
+    }));
+    const item = {
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      files: safeFiles,
+      filesMeta,
+      fileCount: safeFiles.length,
+      createdAt: new Date().toISOString(),
+      reason,
+    };
+    setUploadQueue((prev) => [...prev, item]);
+    const stored = await putQueueFiles(item.id, safeFiles);
+    if (!stored) {
+      setUploadQueue((prev) =>
+        prev.map((queued) => (queued.id === item.id ? { ...queued, persisted: false } : queued))
+      );
+      showToast("브라우저 저장소에 파일을 보관하지 못했습니다. 재시작 시 업로드가 사라질 수 있어요.", "warn");
+    } else {
+      setUploadQueue((prev) =>
+        prev.map((queued) => (queued.id === item.id ? { ...queued, persisted: true } : queued))
+      );
+    }
+    setStatus(`업로드 대기열에 추가됨 (${safeFiles.length}개 파일)`);
+  };
+
+  const uploadFiles = async (files, { fromQueue = false } = {}) => {
+    if (!files || files.length === 0) {
+      return true;
+    }
+
+    const formData = new FormData();
+    for (const file of files) {
+      const relativePath = file.webkitRelativePath || file.name;
+      formData.append("files", file, relativePath);
+    }
+
+    try {
+      setError("");
+      setIsBusy(true);
+      setUploadProgress(0);
+      setStatus(`${fromQueue ? "대기열 업로드" : "업로드"} 중... (${files.length}개 파일)`);
+
+      const res = await axios.post(`${API_BASE_URL}/upload`, formData, {
+        onUploadProgress: (progressEvent) => {
+          if (!progressEvent.total) {
+            return;
+          }
+          const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+          setUploadProgress(percent);
+        },
+      });
+
+      await fetchBooks();
+      const uploadedBooks = Array.isArray(res.data?.books) ? res.data.books : [];
+      if (uploadedBooks.length > 0) {
+        await fetchPages(uploadedBooks[0]);
+      }
+      setStatus(
+        `업로드 완료 (${uploadedBooks.length || 0}권 / ${res.data?.uploadedFiles || files.length}개 파일)`
+      );
+      showToast("업로드가 완료되었습니다.", "success");
+      return true;
+    } catch (err) {
+      const isNetworkError = !err?.response;
+      if (isNetworkError) {
+        if (!fromQueue) {
+          await enqueueUpload(files, "network");
+        }
+        setStatus("네트워크 문제로 업로드가 대기열에 보류되었습니다.");
+        showToast("네트워크 오류로 업로드가 대기열에 추가되었습니다.", "warn");
+      } else {
+        setError("업로드에 실패했습니다. 폴더 선택과 서버 연결을 확인해 주세요.");
+        showToast("업로드 실패: 서버 응답 오류", "error");
+      }
+      return false;
+    } finally {
+      setIsBusy(false);
+      setUploadProgress(0);
+    }
+  };
+
+  const resolveQueueFiles = async (item) => {
+    if (item?.files && item.files.length > 0) {
+      return item.files;
+    }
+    const stored = await getQueueFiles(item?.id);
+    return Array.isArray(stored) ? stored : null;
+  };
+
+  const removeQueueItem = async (id) => {
+    if (!id) {
+      return;
+    }
+    await deleteQueueFiles(id);
+    setUploadQueue((prev) => prev.filter((item) => item.id !== id));
+  };
+
+  const clearQueue = async () => {
+    const ids = uploadQueueRef.current.map((item) => item.id);
+    for (const id of ids) {
+      await deleteQueueFiles(id);
+    }
+    setUploadQueue([]);
+    showToast("업로드 대기열을 모두 비웠습니다.", "info");
+  };
+
+  const toggleQueueItem = (id) => {
+    setExpandedQueueIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const approximateQueueBytes = useMemo(() => {
+    return uploadQueue.reduce((sum, item) => {
+      if (Array.isArray(item.filesMeta)) {
+        return sum + item.filesMeta.reduce((acc, meta) => acc + (meta.size || 0), 0);
+      }
+      return sum;
+    }, 0);
+  }, [uploadQueue]);
+
+  const cleanupQueueBySize = async () => {
+    setUploadQueue((prev) => {
+      let total = prev.reduce((sum, item) => {
+        if (!Array.isArray(item.filesMeta)) {
+          return sum;
+        }
+        return sum + item.filesMeta.reduce((acc, meta) => acc + (meta.size || 0), 0);
+      }, 0);
+      const next = [...prev];
+      while (next.length > 0 && total > QUEUE_LIMIT_BYTES) {
+        const removed = next.shift();
+        if (removed?.filesMeta) {
+          const removedBytes = removed.filesMeta.reduce((acc, meta) => acc + (meta.size || 0), 0);
+          total -= removedBytes;
+          deleteQueueFiles(removed.id);
+        }
+      }
+      return next;
+    });
+  };
+
+  useEffect(() => {
+    if (approximateQueueBytes <= 0) {
+      return;
+    }
+    if (approximateQueueBytes > QUEUE_LIMIT_BYTES && !pendingCleanup) {
+      setPendingCleanup(true);
+    }
+  }, [approximateQueueBytes, pendingCleanup]);
+
+  const formatQueueBytes = (bytes) => {
+    if (!bytes) {
+      return "0MB";
+    }
+    const mb = bytes / (1024 * 1024);
+    return `${mb.toFixed(1)}MB`;
+  };
+
+  const getSortedFiles = (filesMeta) => {
+    const files = Array.isArray(filesMeta) ? [...filesMeta] : [];
+    const trimmedQuery = queueSearch.trim().toLowerCase();
+    const filtered = trimmedQuery
+      ? files.filter((meta) => (meta.path || meta.name || "").toLowerCase().includes(trimmedQuery))
+      : files;
+    const [key, direction] = queueSort.split("-");
+    const multiplier = direction === "desc" ? -1 : 1;
+    return filtered.sort((a, b) => {
+      if (key === "size") {
+        return ((a.size || 0) - (b.size || 0)) * multiplier;
+      }
+      return (a.name || "").localeCompare(b.name || "") * multiplier;
+    });
+  };
+
+  const retryQueueItem = async (id) => {
+    if (isOffline || isBusy) {
+      return;
+    }
+    const target = uploadQueueRef.current.find((item) => item.id === id);
+    if (!target) {
+      return;
+    }
+    const files = await resolveQueueFiles(target);
+    if (!files || files.length === 0) {
+      await removeQueueItem(id);
+      showToast("업로드 파일을 찾을 수 없어 대기열에서 제거했습니다.", "error");
+      return;
+    }
+    const ok = await uploadFiles(files, { fromQueue: true });
+    if (ok) {
+      await removeQueueItem(id);
+    }
+  };
+
+  const processUploadQueue = async () => {
+    if (isProcessingQueueRef.current) {
+      return;
+    }
+    isProcessingQueueRef.current = true;
+
+    try {
+      while (!isOffline && !isBusy && uploadQueueRef.current.length > 0) {
+        const nextItem = uploadQueueRef.current[0];
+        if (!nextItem) {
+          break;
+        }
+        const files = await resolveQueueFiles(nextItem);
+        if (!files || files.length === 0) {
+          await removeQueueItem(nextItem.id);
+          showToast("업로드 파일을 찾을 수 없어 대기열에서 제거했습니다.", "error");
+          continue;
+        }
+        const ok = await uploadFiles(files, { fromQueue: true });
+        if (!ok) {
+          break;
+        }
+        await removeQueueItem(nextItem.id);
+      }
+    } finally {
+      isProcessingQueueRef.current = false;
+    }
+  };
 
   useEffect(() => {
     const loadSelectedPageOcr = async () => {
@@ -290,43 +701,15 @@ function App() {
       return;
     }
 
-    const formData = new FormData();
-    for (const file of files) {
-      const relativePath = file.webkitRelativePath || file.name;
-      formData.append("files", file, relativePath);
-    }
-
-    try {
-      setError("");
-      setIsBusy(true);
-      setUploadProgress(0);
-      setStatus(`업로드 중... (${files.length}개 파일)`);
-
-      const res = await axios.post(`${API_BASE_URL}/upload`, formData, {
-        onUploadProgress: (progressEvent) => {
-          if (!progressEvent.total) {
-            return;
-          }
-          const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-          setUploadProgress(percent);
-        },
-      });
-
-      await fetchBooks();
-      const uploadedBooks = Array.isArray(res.data?.books) ? res.data.books : [];
-      if (uploadedBooks.length > 0) {
-        await fetchPages(uploadedBooks[0]);
-      }
-      setStatus(
-        `업로드 완료 (${uploadedBooks.length || 0}권 / ${res.data?.uploadedFiles || files.length}개 파일)`
-      );
-    } catch (_err) {
-      setError("업로드에 실패했습니다. 폴더 선택과 서버 연결을 확인해 주세요.");
-    } finally {
-      setIsBusy(false);
-      setUploadProgress(0);
+    if (isOffline) {
+      await enqueueUpload(files, "offline");
+      showToast("오프라인 상태로 업로드가 대기열에 저장되었습니다.", "warn");
       e.target.value = "";
+      return;
     }
+
+    await uploadFiles(files);
+    e.target.value = "";
   };
 
   const runProcess = async (mode) => {
@@ -785,6 +1168,15 @@ function App() {
         </div>
       </header>
 
+      {isOffline && (
+        <div className="offline-banner">
+          오프라인 모드입니다. 업로드는 대기열에 저장되며 네트워크 복구 시 자동 재시도됩니다.
+          {uploadQueue.length > 0 && (
+            <span className="offline-queue">대기열 {uploadQueue.length}건</span>
+          )}
+        </div>
+      )}
+
       {error && <div className="error-banner">{error}</div>}
 
       <main className="workspace">
@@ -813,6 +1205,100 @@ function App() {
           {uploadProgress > 0 && (
             <div className="progress-wrap">
               <div className="progress-bar" style={{ width: `${uploadProgress}%` }} />
+            </div>
+          )}
+
+          {uploadQueue.length > 0 && (
+            <div className="queue-panel">
+              <div className="queue-head">
+                <strong>업로드 대기열</strong>
+                <div className="queue-head-actions">
+                  <span>{uploadQueue.length}건 · {formatQueueBytes(approximateQueueBytes)}</span>
+                  <button type="button" className="ghost-btn danger" onClick={clearQueue} disabled={isBusy}>
+                    전체 삭제
+                  </button>
+                </div>
+              </div>
+              <div className="queue-controls">
+                <input
+                  className="queue-search"
+                  placeholder="파일 검색"
+                  value={queueSearch}
+                  onChange={(e) => setQueueSearch(e.target.value)}
+                />
+                <select
+                  className="queue-sort"
+                  value={queueSort}
+                  onChange={(e) => setQueueSort(e.target.value)}
+                >
+                  <option value="name-asc">이름 ↑</option>
+                  <option value="name-desc">이름 ↓</option>
+                  <option value="size-asc">크기 ↑</option>
+                  <option value="size-desc">크기 ↓</option>
+                </select>
+              </div>
+              <div className="queue-list">
+                {uploadQueue.map((item) => {
+                  const displayName = item.filesMeta?.[0]?.name || "파일 묶음";
+                  const extraCount = (item.filesMeta?.length || item.fileCount || 1) - 1;
+                  const isExpanded = expandedQueueIds.has(item.id);
+                  const sortedFiles = isExpanded ? getSortedFiles(item.filesMeta) : [];
+                  return (
+                    <div key={item.id} className="queue-item">
+                      <div className="queue-info">
+                        <strong>{item.fileCount || item.filesMeta?.length || 0}개 파일</strong>
+                        <span>
+                          {displayName}
+                          {extraCount > 0 ? ` 외 ${extraCount}개` : ""}
+                        </span>
+                        {item.createdAt && (
+                          <span className="queue-meta">
+                            {new Date(item.createdAt).toLocaleString()}
+                          </span>
+                        )}
+                        {item.persisted === false && <span className="queue-warn">재시작 시 유실 가능</span>}
+                        {Array.isArray(item.filesMeta) && item.filesMeta.length > 0 && (
+                          <button
+                            type="button"
+                            className="queue-toggle"
+                            onClick={() => toggleQueueItem(item.id)}
+                          >
+                            {isExpanded ? "파일 숨기기" : "파일 목록 보기"}
+                          </button>
+                        )}
+                        {isExpanded && Array.isArray(item.filesMeta) && (
+                          <div className="queue-files">
+                            {sortedFiles.map((meta, index) => (
+                              <span key={`${item.id}-${meta.name}-${index}`}>
+                                {meta.path || meta.name} ({Math.round((meta.size || 0) / 1024)}KB)
+                              </span>
+                            ))}
+                            {sortedFiles.length === 0 && <span>검색 결과가 없습니다.</span>}
+                          </div>
+                        )}
+                      </div>
+                      <div className="queue-actions">
+                        <button
+                          type="button"
+                          className="ghost-btn"
+                          onClick={() => retryQueueItem(item.id)}
+                          disabled={isOffline || isBusy}
+                        >
+                          재시도
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost-btn danger"
+                          onClick={() => removeQueueItem(item.id)}
+                          disabled={isBusy}
+                        >
+                          삭제
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
 
@@ -851,6 +1337,9 @@ function App() {
           <div className="status-box">
             <span>Status</span>
             <p>{isBusy ? "작업 진행 중..." : status}</p>
+            {uploadQueue.length > 0 && (
+              <div className="queue-hint">업로드 대기열: {uploadQueue.length}건</div>
+            )}
           </div>
         </aside>
 
@@ -1227,6 +1716,44 @@ function App() {
           )}
         </section>
       </main>
+
+      <div className={`toast ${toast.type} ${toast.visible ? "show" : ""}`} role="status" aria-live="polite">
+        {toast.message}
+      </div>
+
+      {pendingCleanup && (
+        <div className="modal-backdrop" role="presentation">
+          <div className="modal" role="dialog" aria-modal="true" aria-labelledby="queue-cleanup-title">
+            <h3 id="queue-cleanup-title">업로드 대기열 용량 초과</h3>
+            <p>
+              현재 대기열은 {formatQueueBytes(approximateQueueBytes)}로 설정된 한도(
+              {QUEUE_LIMIT_MB}MB)를 초과했습니다. 오래된 항목부터 자동 정리할까요?
+            </p>
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="ghost-btn danger"
+                onClick={async () => {
+                  await cleanupQueueBySize();
+                  setPendingCleanup(false);
+                  showToast("대기열을 정리했습니다.", "info");
+                }}
+              >
+                정리하기
+              </button>
+              <button
+                type="button"
+                className="ghost-btn"
+                onClick={() => {
+                  setPendingCleanup(false);
+                }}
+              >
+                나중에
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -137,6 +137,28 @@ h1 {
   margin-bottom: 12px;
 }
 
+.offline-banner {
+  border: 1px solid #d6c6a8;
+  background: #fff8e6;
+  color: #7a5a1d;
+  padding: 10px 12px;
+  border-radius: 10px;
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-weight: 600;
+}
+
+.offline-queue {
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(122, 90, 29, 0.12);
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .workspace {
   display: grid;
   grid-template-columns: minmax(280px, 360px) 1fr;
@@ -150,6 +172,54 @@ h1 {
   padding: 16px;
   box-shadow: 0 10px 26px rgba(15, 23, 42, 0.08);
   backdrop-filter: blur(4px);
+}
+
+.queue-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.toast {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  min-width: 220px;
+  max-width: 320px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.14);
+  opacity: 0;
+  transform: translateY(10px);
+  transition: opacity 180ms ease, transform 180ms ease;
+  pointer-events: none;
+  z-index: 2000;
+}
+
+.toast.show {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.toast.success {
+  border-color: #b7e0c2;
+  background: #f2fbf5;
+  color: #1f6d3a;
+}
+
+.toast.warn {
+  border-color: #e6d2a8;
+  background: #fff7e8;
+  color: #7a5a1d;
+}
+
+.toast.error {
+  border-color: #f3c2c8;
+  background: #fff5f6;
+  color: var(--error);
 }
 
 .panel-head {
@@ -180,6 +250,11 @@ h1 {
   transform: translateY(-1px);
   border-color: var(--line-strong);
   background: color-mix(in srgb, var(--panel) 88%, var(--bg-soft));
+}
+
+.ghost-btn.danger {
+  border-color: #f0b7be;
+  color: #b4232a;
 }
 
 .cancel-btn {
@@ -219,6 +294,152 @@ h1 {
   background: #e7edf4;
   margin-bottom: 10px;
   overflow: hidden;
+}
+
+.queue-panel {
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  padding: 10px;
+  margin-bottom: 12px;
+  background: color-mix(in srgb, var(--panel) 80%, transparent);
+}
+
+.queue-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+.queue-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.queue-controls {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.queue-search {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 6px 10px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.queue-sort {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 6px 10px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.queue-list {
+  display: grid;
+  gap: 8px;
+}
+
+.queue-item {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--panel) 94%, transparent);
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.queue-info {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.queue-info strong {
+  font-size: 13px;
+}
+
+.queue-meta {
+  color: var(--muted);
+}
+
+.queue-warn {
+  color: #b04b00;
+  font-weight: 600;
+}
+
+.queue-toggle {
+  background: none;
+  border: none;
+  padding: 0;
+  color: #3d86c2;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.queue-files {
+  display: grid;
+  gap: 4px;
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(61, 134, 194, 0.08);
+  color: var(--text);
+  max-height: 120px;
+  overflow: auto;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.4);
+  display: grid;
+  place-items: center;
+  z-index: 2100;
+  padding: 16px;
+}
+
+.modal {
+  width: min(420px, 100%);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 16px;
+  box-shadow: 0 20px 40px rgba(15, 23, 42, 0.2);
+  color: var(--text);
+}
+
+.modal h3 {
+  margin: 0 0 8px;
+  font-size: 18px;
+}
+
+.modal p {
+  margin: 0 0 16px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.queue-actions {
+  display: grid;
+  gap: 6px;
+  align-content: start;
 }
 
 .progress-bar {
